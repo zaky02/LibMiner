@@ -11,11 +11,11 @@ import scipy as sp
 from multiprocessing import Pool
 
 
-def process_batch(batch_file, num_workers):
+def process_batch(batch_partitions, num_workers):
     """
     Process a single batch file in parallel.
     """
-    files = np.genfromtxt(batch_file, dtype=str)
+    files = np.genfromtxt(batch_partitions, dtype=str)
     with Pool(num_workers) as pool:
         pool.map(process_file, files)
 
@@ -75,15 +75,15 @@ if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(description='')
     requiredArguments = parser.add_argument_group('Required Arguments')
-    requiredArguments.add_argument('--batch_file',
-                                   help='File containing batch files',
+    requiredArguments.add_argument('--batch_partitions',
+                                   help='Batch file with the paths to the DB partitions',
                                    required=True)
     requiredArguments.add_argument('--cores',
                                    help='',
                                    type=int,
                                    required=True)
     args = parser.parse_args()
-    batch_file = args.batch_file
+    batch_partitions = args.batch_partitions
     cores = args.cores
 
-    process_batch(batch_file, cores)
+    process_batch(batch_partitions, cores)
