@@ -1,70 +1,95 @@
 import os
+import sys
 import pandas as pd
 import numpy as np
 import pickle
 import random
-from multiprocessing import Pool
+from multiprocessing import Pool, Manager
 from rdkit import Chem
 from rdkit.Chem import rdFingerprintGenerator, AllChem
-from rdkit.DataStructs import TanimotoSimilarity
+from rdkit.DataStructs import TanimotoSimilarity, BulkTanimotoSimilarity
+import psutil
+import warnings
 
-def process_batch(batch_partitions, num_workers, cfp, n, min_mol, outname):
-    files = np.genfromtxt(batch_partitions, dtype=str)
-    with Pool(num_workers) as pool:
-        pool.starmap(get_subset, [(cfp, part_file, n, min_mol, outname) for part_file in files])
-
-    merge_and_select_representatives(outname, n)
-
-def get_subset(cfp, part_file, n, min_mol, outname):
-    
-    process_id = os.getpid()
-    print(f"[PROCESS {process_id}] Processing file: {part_file}")
-    part_df = pd.read_csv(part_file)
-    representatives = []
-
+def process_clusters(cfp, batch_partitions, num_workers, n, min_mol, outname):
+  
     with open(cfp, 'rb') as f:
         cfp = pickle.load(f)
+
+    with Manager() as manager:
+        
+        with Pool(num_workers) as pool:
+            # Generate tasks for each multiprocess in pool
+            tasks = [(cluster_id, cfp[cluster_id], batch_partitions, n, min_mol, outname) for cluster_id in cfp.keys()]
+            results = pool.starmap(get_representative, tasks)
     
-    for keys, values in cfp.items():
-        # Keys: final cluster ID
-        # Values: fingerprints (numpy darray)
-       
-        print(f"[PROCESS {process_id}] Retriving set of molecules belonging to ccluster")
-        set_mols = part_df[part_df['centroid_cluster'] == keys]
+    results = np.asarray(results)
+    df = pd.DataFrame({'cluster':results[:,0],
+        'representative_id':results[:,1],
+        'representative_smiles':results[:,2],
+        'cluster_size':results[:,4]})
+    df = df.astype({"cluster": str, "representative_id": str,
+        "representative_smiles": str, "cluster_size":int})
 
-        if len(set_mols) < min_mol:
+
+    df.to_csv(outname + '_clust_all.csv', index=False)
+
+    df_subset = df[df['cluster_size'] >= min_mol]
+
+    if len(df_subset) < n:
+        warnings.warn(f"Less clusters ({len(df_subset)}) than required subset size ({n}). Maybe try reducing min_mol.", UserWarning)
+        df_subset.to_csv(outname + '_clust_subset_' + str(len(df_subset)) + '.csv', index=False)
+    elif len(df_subset) == n:
+        df_subset.to_csv(outname + '_clust_subset_' + str(n) + '.csv', index=False)
+    elif len(df_subset) > n:
+        df_sorted = df_subset.sort_values(by="cluster_size", ascending=False)
+        df_top_n = df_sorted.head(n)
+        df_top_n.to_csv(outname + '_clust_subset_' + str(n) + '.csv', index=False)
+
+def get_representative(cluster_id, centroid_fp, batch_partitions, n, min_mol, outname):
+    
+    process = psutil.Process(os.getpid())
+    process_id = os.getpid()
+    print(f"[PROCESS {process_id}] #### Processing cluster: {cluster_id} ####")
+    #mem_info = process.memory_info()
+    #print(f"Process {os.getpid()} - Memory Usage: {mem_info.rss / 1024 ** 2:.2f} MB")
+
+    partitions = np.genfromtxt(batch_partitions, dtype=str)
+
+    representative = [cluster_id,'', '', 0, 0]
+    for partition in partitions:
+        #print(f"[PROCESS {process_id}] Processing partition {os.path.basename(partition)} for cluster {cluster_id}")
+        part_df = pd.read_csv(partition)
+        
+        # Get molecules from given cluster in given partition
+        part_cluster_df = part_df[part_df['centroid_cluster'] == cluster_id]
+        
+        if len(part_cluster_df) == 0:
             continue
-
-        print(f"[PROCESS {process_id}] Retrieving fingerprints of the ccluster molecules")
-        mols = [Chem.MolFromSmiles(smiles) for smiles in set_mols.SMILES]
-        set_mols.loc[:, 'fingerprint'] = [AllChem.GetMorganFingerprintAsBitVect(mol, radius=4, nBits=1024) for mol in mols]
-        X = np.array([list(fp) for fp in set_mols['fingerprint']])
+        
+        ids = part_cluster_df['ID'].to_list()
+        smiles = part_cluster_df['SMILES'].to_list()
+        del part_cluster_df
+        representative[4]+=len(smiles)
          
-        print(f"[PROCESS {process_id}] Retriving most similar molecule to the centroid of the ccluster")
-        pop_counts = np.sum(X, axis=1)
-        a_centroid = np.dot(X, values)
-        
-        sims_med = a_centroid / (pop_counts + np.sum(values) - a_centroid)
-        sim_mol = np.argmax(sims_med)
-        
-        print(f"[PROCESS {process_id}] Storing n representatives of the DB")
-        representatives.append(set_mols.iloc[[sim_mol]])
-        representatives_df = pd.concat(representatives, ignore_index=True)
-        representatives_df.to_csv(f"{outname}_{process_id}_results.csv", index=False)
+        mols = [Chem.MolFromSmiles(smile) for smile in smiles]
+        fpgen = rdFingerprintGenerator.GetMorganGenerator(radius=4, fpSize=1024)
+        fps = [fpgen.GetFingerprint(mol) for mol in mols]
 
-def merge_and_select_representatives(outname, n):
-    temp_files = [f for f in os.listdir() if f.endswith("_results.csv")]
-    merged_df = pd.concat([pd.read_csv(f) for f in temp_files], ignore_index=True)
+        similarities = BulkTanimotoSimilarity(centroid_fp, fps)
+        idx = np.argmax(similarities)
+        if similarities[idx] > representative[3]:
+            representative[1] = ids[idx] 
+            representative[2] = smiles[idx]
+            representative[3] = similarities[idx]
+    
+    print(f"[PROCESS {process_id}] Most similar molecule to the centroid of the cluster {cluster_id} is {representative[2]} with a similarity of {representative[3]} to the centroid")
+    return representative
 
-    merged_df = merged_df.drop_duplicates(subset=['centroid_cluster'])
-    merged_df = merged_df.drop(columns=['fingerprint'])
-
-    n_representatives = merged_df.sample(n=min(n, len(merged_df)))
-    n_representatives.to_csv(f"{outname}_final.csv", index=False)
-
-    for f in temp_files:
-        os.remove(f)
-
+def get_object_memory(obj):
+    mem = sys.getsizeof(obj)
+    mem = mem / (1024 ** 2)
+    return mem
 
 if __name__ == '__main__':
     import argparse
@@ -102,4 +127,4 @@ if __name__ == '__main__':
     outname = args.outname
     cores = args.cores
 
-    process_batch(batch_partitions, cores, cfp, n, min_mol, outname)
+    process_clusters(cfp, batch_partitions, cores, n, min_mol, outname)
