@@ -38,14 +38,12 @@ def centroid_clustering(batch_centroids, outname):
         bitstring_fp = ''.join(map(str, np_fp))
         rdkit_fp = CreateFromBitString(bitstring_fp) 
         rdkit_centroid_dict[ccluster] = rdkit_fp
-
+    
     path = os.path.dirname(batch_centroids) + '/'
     print(f'Saving the new centroids of the centroid clustering'
             f' to {path}{outname}')
-    #with open(path + outname + '.pkl','wb') as f:
-    #    pickle.dump(centroids_dict, f)
     with open(path + outname + '_rdkit.pkl','wb') as f:
-        pickle.dump(centroids_dict, f)
+        pickle.dump(rdkit_centroid_dict, f)
     
     # Get a dictionary of dictionaries with [partition][p_clusterid] = [c_clusterid]
     pcluster_to_ccluster = {}
