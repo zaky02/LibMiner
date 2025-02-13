@@ -1,14 +1,14 @@
 import os
 import numpy as np
 
-total_files = 884
-files_per_batch = 28
+total_files = 10
+files_per_batch = 10
 full_batches = int(total_files / files_per_batch)
 partial_files = total_files % files_per_batch
 
 prefix = 'ZINC20_partition'
-path = '/gpfs/projects/bsc72/Libraries4DSD/ZINC20_partitioned'
-out_path = '/gpfs/projects/bsc72/Libraries4DSD/ZINC20_batches'
+path = '/gpfs/projects/bsc72/Libraries4DSD/ZINC20_test'
+out_path = '/gpfs/projects/bsc72/Libraries4DSD'
 counter = 0
 
 for i in range(full_batches):
