@@ -6,6 +6,7 @@ from utils.bitbirch_clustering import get_bitbirch_clusters
 
 # 1M molecules partitions occupy about 8 GB of fps
 # we recomend using no more than 28 cores
+# Find new fps calculating method
 
 def process_batch(batch_partitions, num_workers):
     """
