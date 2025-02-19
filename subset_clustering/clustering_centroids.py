@@ -4,6 +4,8 @@ from functools import partial
 from multiprocessing import Pool
 from utils.bitbirch_clustering import get_bitbirch_clusters
 
+# Check if we are storing the values correctly in the original csv files
+
 def process_file(file):
     df = pd.read_csv(file)
     centroid_df = df[df['partition_centroid'] == 1].copy()
