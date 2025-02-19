@@ -44,14 +44,14 @@ def get_bitbirch_clusters(df, file_id):
             cluster_labels[idx] = cluster_id
 
         cluster_smiles = df.iloc[indices]['SMILES'].to_list()
-        mols = [Chem.MolFromSmiles(smile) for smile in cluster_smiles]
-        fps_cluster = [fpgen.GetFingerprint(mol) for mol in mols]
+        cluster_mols = [Chem.MolFromSmiles(smile) for smile in cluster_smiles]
+        cluster_fps = [fpgen.GetFingerprint(mol) for mol in cluster_mols]
 
         centroid_fp = centroids[cluster_id]
         centroid_fp = ''.join(str(int(x)) for x in centroid_fp)
         centroid_fp = CreateFromBitString(centroid_fp)
 
-        similarities = BulkTanimotoSimilarity(centroid_fp, fps_cluster)
+        similarities = BulkTanimotoSimilarity(centroid_fp, cluster_fps)
         cent_idx = indices[np.argmax(similarities)]
         centroid_labels[cent_idx] = 1
 
