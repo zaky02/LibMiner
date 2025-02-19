@@ -7,7 +7,7 @@
 #SBATCH --error=logs/%j.err
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=28
+#SBATCH --cpus-per-task=10
 #SBATCH --time=48:00:00
 #SBATCH --qos=gp_bscls
 
@@ -22,4 +22,4 @@ ml anaconda
 eval "$(conda shell.bash hook)"
 source activate /gpfs/projects/bsc72/conda_envs/MolecularAnalysis
 
-time python -u clustering_partitions.py --batch_partitions /gpfs/projects/bsc72/Libraries4DSD/ZINC20_batch_1 --cores 28 > ZINC_part_clustering.out 2>&1
+time python -u clustering_partitions.py --batch_partitions /gpfs/projects/bsc72/Libraries4DSD/ZINC20_batch_2 --cores 10 > ZINC_part_clustering.out 2>&1
