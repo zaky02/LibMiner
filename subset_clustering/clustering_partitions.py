@@ -8,28 +8,42 @@ from utils.bitbirch_clustering import get_bitbirch_clusters
 # we recomend using no more than 28 cores
 # Find new fps calculating method
 
-def process_batch(batch_partitions, num_workers):
+def process_batch(batch_partitions, num_workers, verbose):
     """
     Process a single batch file in parallel.
     """
     files = np.genfromtxt(batch_partitions, dtype=str)
-    print(files)
+    process_file_args = [(file, verbose) for file in files] 
     with Pool(num_workers) as pool:
-        pool.map(process_file, files)
+        result = pool.starmap_async(process_file, process_file_args)
+        
+        # Wait for all processes to complete and handle any exceptions
+        try:
+            result.get()  # This will raise any exception encountered by a worker
+        except Exception as e:
+            print(f"Error encountered: {e}. Stopping all execution.")
+            pool.terminate()  # Terminate all processes immediately
+            pool.join()  # Ensure that all processes are cleaned up
+            raise  # Reraise the exception to stop execution
 
-def process_file(file):
+def process_file(file, verbose):
     process_id = os.getpid()
-    print(f'[PROCESS {process_id}] Processing file: {file}')
-    df = pd.read_csv(file)
-    file_id = os.path.basename(file)
-    print(f'[PROCESS {process_id}] Clustering file: {file}')
-    birch_centroid_labels, birch_cluster_labels = get_bitbirch_clusters(df, file_id)
+    try:
+        print(f'[PROCESS {process_id}] Processing file: {file}')
+        df = pd.read_csv(file)
+        file_id = os.path.basename(file)
+        
+        print(f'[PROCESS {process_id}] Clustering file: {file}')
+        birch_representative_labels, birch_cluster_labels = get_bitbirch_clusters(df, file_id, verbose)
+        
+        print(f'[PROCESS {process_id}] Adding cluster ID and representative to: {file}')
+        df['partition_cluster'] = birch_cluster_labels
+        df['partition_representative'] = birch_representative_labels
+        df.to_csv(file, index=False)
     
-    print(f'[PROCESS {process_id}] Adding cluster ID and centroid to: {file}')
-    df['partition_cluster'] = birch_cluster_labels
-    df['partition_centroid'] = birch_centroid_labels
-    df.to_csv(file, index=False)
-
+    except Exception as e:
+        print(f"[PROCESS {process_id}] Error processing {file}: {str(e)}")
+        raise  # Reraise the error to propagate it back and stop the pool
 
 if __name__ == '__main__':
     import argparse
@@ -42,8 +56,14 @@ if __name__ == '__main__':
                                    help='',
                                    type=int,
                                    required=True)
+    parser.add_argument('-v',
+                        dest='verbose',
+                        help='verbosity to debug',
+                        default=False)
+
     args = parser.parse_args()
     batch_partitions = args.batch_partitions
     cores = args.cores
+    verbose = args.verbose
 
-    process_batch(batch_partitions, cores)
+    process_batch(batch_partitions, cores, verbose)
