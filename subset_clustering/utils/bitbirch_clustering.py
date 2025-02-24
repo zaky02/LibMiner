@@ -16,19 +16,13 @@ def get_object_memory(obj):
 
 def generate_fingerprints(smiles_list, file_id, verbose):
     
-    mols = []
+    fps = []
     for i, smile in enumerate(smiles_list):
         mol = Chem.MolFromSmiles(smile)
-        mols.append(mol)
-        if i % 5000 == 0 and i != 0 and verbose:
-            print(f'{i}/{len(smiles_list)} calc. mols for {file_id}')    
-    
-    fps = []
-    for i, mol in enumerate(mols):
         fp = Chem.RDKFingerprint(mol)
-        fps.append(fp)
+        fps.append(fp) 
         if i % 5000 == 0 and i != 0 and verbose:
-            print(f'{i}/{len(mols)} calc. fps for {file_id}') 
+            print(f'{i}/{len(smiles_list)} calc. fps for {file_id}')    
     
     if verbose:
         print('Fingerprint calculation ended!')
@@ -36,7 +30,6 @@ def generate_fingerprints(smiles_list, file_id, verbose):
     
     fps_sparse = scipy.sparse.csr_matrix(fps)
     
-    del mols
     del fps
     return fps_sparse
 
