@@ -14,9 +14,11 @@ from multiprocessing import Pool, current_process
 from rdkit.Chem import rdFingerprintGenerator, AllChem
 from rdkit.DataStructs import TanimotoSimilarity, BulkTanimotoSimilarity, CreateFromBitString, ExplicitBitVect
 import gc
+from pympler.asizeof import asizeof
 
 def get_object_memory(obj):
-    mem = sys.getsizeof(obj)
+    #mem = sys.getsizeof(obj)
+    mem = asizeof(obj)
     mem = mem / (1024 ** 2)
     return mem
 
@@ -46,15 +48,14 @@ def generate_fingerprints(smiles_list, file_id, fpsize, verbose):
     process = psutil.Process(process_id)
     
     fpgen = rdFingerprintGenerator.GetMorganGenerator(radius=4, fpSize=fpsize)
-    fps = []
-    # fps = np.empty((0, 2048), dtype=np.uint8)
+    
+    fps = np.zeros((len(smiles_list), fpsize // 4), dtype=np.uint8)
     for i, smile in enumerate(smiles_list):
         mol = Chem.MolFromSmiles(smile)
         fp = fpgen.GetFingerprintAsNumPy(mol)
         fp = fold_fingerprint(fp, fpsize)
         fp = fold_fingerprint(fp, fpsize // 2)
-        fps.append(fp)
-        # fps = np.append(fps, np.expand_dims(fpgen.GetFingerprintAsNumPy(mol), axis=0), axis=0)
+        fps[i] = fp
 
         if i % 5000 == 0 and i != 0 and verbose:
             print(f'{i}/{len(smiles_list)} calc. fps for {file_id}')
@@ -63,8 +64,8 @@ def generate_fingerprints(smiles_list, file_id, fpsize, verbose):
         if i % 50000 == 0 and is_print_process():
             get_CPU_memory()
 
-    fps = np.array(fps)
     del process_id, process, fpgen, i, smile, mol, fp
+    
     return fps
 
 def get_bitbirch_clusters(df, file_id, fpsize, verbose):
@@ -75,9 +76,10 @@ def get_bitbirch_clusters(df, file_id, fpsize, verbose):
     
     timer_fps = Timer(autoreset=True)
     timer_fps.start(f'[PROCESS {process_id}] Calculating fingerprints ({file_id})')
+    
     fps = generate_fingerprints(df.SMILES, file_id, fpsize, verbose)
     gc.collect()
-    timer_fps.stop(f'[PROCESS {process_id}] Fingerprint calculation ended ({file_id})')
+    timer_fps.stop()
     mem_fps = get_object_memory(fps)
     
     if verbose:
