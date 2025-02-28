@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 from multiprocessing import Pool, current_process
 from utils.memory import get_CPU_memory
-from utils.bitbirch_clustering_1 import get_bitbirch_clusters
+from utils.bitbirch_clustering import get_bitbirch_clusters
 
 # 1M molecules partitions occupy about 8 GB of fps
 # we recomend using no more than 28 cores
