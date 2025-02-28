@@ -1,3 +1,4 @@
+import gc
 import os
 import sys
 import time
@@ -6,6 +7,7 @@ import psutil
 import numpy as np
 import pandas as pd
 from .timer import Timer
+from pympler import asizeof
 from . import bitbirch as bb
 from scipy.sparse import vstack
 from .memory import get_CPU_memory
@@ -13,12 +15,9 @@ from rdkit import Chem, DataStructs
 from multiprocessing import Pool, current_process
 from rdkit.Chem import rdFingerprintGenerator, AllChem
 from rdkit.DataStructs import TanimotoSimilarity, BulkTanimotoSimilarity, CreateFromBitString, ExplicitBitVect
-import gc
-from pympler.asizeof import asizeof
 
 def get_object_memory(obj):
-    #mem = sys.getsizeof(obj)
-    mem = asizeof(obj)
+    mem = asizeof.asizeof(obj)
     mem = mem / (1024 ** 2)
     return mem
 
@@ -26,17 +25,17 @@ def is_print_process():
     return current_process().name == "ForkPoolWorker-1"
 
 def fold_fingerprint(fp, fpsize):
-    """ 
+    """
     """
     if fpsize % 2 != 0:
         raise ValueError("Fingerprint length must be even for equal folding.")
-    
+
     half_n = fpsize // 2
     first_half = fp[:half_n]
     second_half = fp[half_n:]
 
     folded_fp = np.logical_or(first_half, second_half).astype(np.uint8)
-    
+
     del half_n, first_half, second_half
 
     return folded_fp
@@ -49,7 +48,7 @@ def generate_fingerprints(smiles_list, file_id, fpsize, verbose):
     
     fpgen = rdFingerprintGenerator.GetMorganGenerator(radius=4, fpSize=fpsize)
     
-    fps = np.zeros((len(smiles_list), fpsize // 4), dtype=np.uint8)
+    fps = np.empty((len(smiles_list), fpsize // 4), dtype=np.uint8)
     for i, smile in enumerate(smiles_list):
         mol = Chem.MolFromSmiles(smile)
         fp = fpgen.GetFingerprintAsNumPy(mol)
@@ -65,32 +64,34 @@ def generate_fingerprints(smiles_list, file_id, fpsize, verbose):
             get_CPU_memory()
 
     del process_id, process, fpgen, i, smile, mol, fp
+    gc.collect()
     
     return fps
 
-def get_bitbirch_clusters(df, file_id, fpsize, verbose):
+def get_bitbirch_clusters(df, file_id, fpsize, bf, thr, verbose):
     """
     """
     process_id = os.getpid()
     process = psutil.Process(process_id)
     
+    timer_birch = Timer(autoreset=True)
+    timer_birch.start(f'[PROCESS {process_id}] BitBIRCH clustering executing for {file_id}')
+    
     timer_fps = Timer(autoreset=True)
     timer_fps.start(f'[PROCESS {process_id}] Calculating fingerprints ({file_id})')
-    
     fps = generate_fingerprints(df.SMILES, file_id, fpsize, verbose)
-    gc.collect()
     timer_fps.stop()
-    mem_fps = get_object_memory(fps)
     
+    mem_fps = get_object_memory(fps)
     if verbose:
         print(f'[PROCESS {process_id}] {mem_fps} MB of memory ocupied by fps ({file_id})')
         print(f"[PROCESS {process_id}] {process.memory_info().rss / (1024 ** 2):.2f} MB of memory used after calculating fps ({file_id})")
     
     timer_fps = Timer(autoreset=True)
-    timer_fps.start(f'[PROCESS {process_id}] Clustering started ({file_id})')
-    bitbirch = bb.BitBirch(branching_factor=50, threshold=0.65)
+    timer_fps.start(f'[PROCESS {process_id}] Clustering ({file_id})')
+    bitbirch = bb.BitBirch(branching_factor=int(bf), threshold=float(thr))
     bitbirch.fit(fps)
-    timer_fps.stop(f'[PROCESS {process_id}] Clustering eneded ({file_id})')
+    timer_fps.stop()
 
     if verbose:
         print(f"[PROCESS {process_id}] {process.memory_info().rss / (1024 ** 2):.2f} MB of memory used after bitbirch clustering ({file_id})")
@@ -104,34 +105,29 @@ def get_bitbirch_clusters(df, file_id, fpsize, verbose):
     
     print(f'[PROCESS {process_id}] Number of clusters for {file_id}: {len(cluster_list)}')
 
-    print(f'[PROCESS {process_id}] Saving clusters for {file_id}')
-    n_molecules = fps.shape[0]
-    cluster_labels = [0] * n_molecules
-    representative_labels = [0] * n_molecules
+    print(f'[PROCESS {process_id}] Computing representatives for each cluster {file_id}')
+    
+    cluster_labels = [0] * fps.shape[0]
+    representative_labels = [0] * fps.shape[0]
 
     for cluster_id, indices in enumerate(cluster_list):
         for idx in indices:
             cluster_labels[idx] = cluster_id
 
-        # Retrieving cluster fingerprints
-        cluster_fps = [fps[idx] for idx in indices]
-        cluster_fps = [''.join(str(int(x)) for x in fp) for fp in cluster_fps]
-        cluster_fps = [CreateFromBitString(fp) for fp in cluster_fps]
-
-        # Retrieveing mathematical centroid fingerprint
-        centroid_fp = centroids[cluster_id]
-        centroid_fp = ''.join(str(int(x)) for x in centroid_fp)
-        centroid_fp = CreateFromBitString(centroid_fp)
+        # Retrieving cluster fingerprints and mathematical centroid fingerprint
+        cluster_fps = [CreateFromBitString(''.join(str(int(x)) for x in fps[idx])) for idx in indices]
+        centroid_fp = CreateFromBitString(''.join(str(int(x)) for x in centroids[cluster_id]))
 
         similarities = BulkTanimotoSimilarity(centroid_fp, cluster_fps)
         
         if verbose and len(indices)>5:
             print(f'cluster {cluster_id} with {len(similarities)} elements, representative similarity to centroid = {np.max(similarities)} ({file_id})')
         
-        cent_idx = indices[np.argmax(similarities)]
-        representative_labels[cent_idx] = 1
+        representative_labels[indices[np.argmax(similarities)]] = 1
         
     if verbose:
         print(f"[PROCESS {process_id}] {process.memory_info().rss / (1024 ** 2):.2f} MB of memory used after loading centroids and representatives")
     
+    timer_birch.stop()
+   
     return representative_labels, cluster_labels
