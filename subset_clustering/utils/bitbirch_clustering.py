@@ -6,15 +6,14 @@ import scipy
 import psutil
 import numpy as np
 import pandas as pd
-from .timer import Timer
-from pympler import asizeof
-from . import bitbirch as bb
 from scipy.sparse import vstack
-from .memory import get_CPU_memory
-from rdkit import Chem, DataStructs
+from pympler import asizeof
 from multiprocessing import Pool, current_process
-from rdkit.Chem import rdFingerprintGenerator, AllChem
+from rdkit.Chem import rdFingerprintGenerator, AllChem, MolFromSmiles
 from rdkit.DataStructs import TanimotoSimilarity, BulkTanimotoSimilarity, CreateFromBitString, ExplicitBitVect
+from .timer import Timer
+from . import bitbirch as bb
+from .memory import get_CPU_memory
 
 def get_object_memory(obj):
     mem = asizeof.asizeof(obj)
@@ -50,7 +49,7 @@ def generate_fingerprints(smiles_list, file_id, fpsize, verbose):
     
     fps = np.empty((len(smiles_list), fpsize // 4), dtype=np.uint8)
     for i, smile in enumerate(smiles_list):
-        mol = Chem.MolFromSmiles(smile)
+        mol = MolFromSmiles(smile)
         fp = fpgen.GetFingerprintAsNumPy(mol)
         fp = fold_fingerprint(fp, fpsize)
         fp = fold_fingerprint(fp, fpsize // 2)
