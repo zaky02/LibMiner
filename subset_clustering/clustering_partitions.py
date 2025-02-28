@@ -4,18 +4,18 @@ import pandas as pd
 import numpy as np
 from multiprocessing import Pool, current_process
 from utils.memory import get_CPU_memory
-from utils.bitbirch_clustering import get_bitbirch_clusters
+from utils.bitbirch_clustering_1 import get_bitbirch_clusters
 
 # 1M molecules partitions occupy about 8 GB of fps
 # we recomend using no more than 28 cores
 # Find new fps calculating method
 
-def process_batch(batch_partitions, num_workers, fpsize, verbose):
+def process_batch(batch_partitions, num_workers, fpsize, bf, sim, verbose):
     """
     Process a single batch file in parallel.
     """
     files = np.genfromtxt(batch_partitions, dtype=str)
-    process_file_args = [(file, fpsize, verbose) for file in files] 
+    process_file_args = [(file, fpsize, bf, sim, verbose) for file in files] 
     with Pool(num_workers) as pool:
         result = pool.starmap_async(process_file, process_file_args)
         
@@ -31,7 +31,7 @@ def process_batch(batch_partitions, num_workers, fpsize, verbose):
 def is_print_process():
     return current_process().name == "ForkPoolWorker-1"
 
-def process_file(file, fpsize, verbose):
+def process_file(file, fpsize, bf, sim, verbose):
     process_id = os.getpid()
     process = psutil.Process(process_id)
     try:
@@ -51,7 +51,7 @@ def process_file(file, fpsize, verbose):
                 get_CPU_memory()
         
         print(f'[PROCESS {process_id}] Clustering ({file})')
-        birch_representative_labels, birch_cluster_labels = get_bitbirch_clusters(df, file_id, fpsize, verbose)
+        birch_representative_labels, birch_cluster_labels = get_bitbirch_clusters(df, file_id, fpsize, bf, sim, verbose)
         
         print(f'[PROCESS {process_id}] Adding cluster ID and representative ({file})')
         df['partition_cluster'] = birch_cluster_labels
@@ -76,16 +76,26 @@ if __name__ == '__main__':
     parser.add_argument('-v',
                         dest='verbose',
                         help='verbosity to debug',
-                        default=False)
-    parser.add_argument('-fpsize',
+                        default=False,
+                        type=bool)
+    parser.add_argument('--fpsize',
                         dest='fpsize',
                         help='',
-                        default=2048)
+                        default=2048,
+                        type=int)
+    parser.add_argument('--branch_factor',
+                        help='',
+                        default=50)
+    parser.add_argument('--thr',
+                        help='',
+                        default=0.6)
 
     args = parser.parse_args()
     batch_partitions = args.batch_partitions
     cores = args.cores
     verbose = args.verbose
-    fpsize = int(args.fpsize)
+    fpsize = args.fpsize
+    bf = args.branch_factor
+    thr = args.thr
 
-    process_batch(batch_partitions, cores, fpsize, verbose)
+    process_batch(batch_partitions, cores, fpsize, bf, thr, verbose)
