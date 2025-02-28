@@ -1,2 +1,5 @@
 logs/*
 runs/*
+subset_clustering/logs/*
+subset_clustering/utils/__pycache__/*
+
