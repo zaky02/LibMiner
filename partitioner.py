@@ -1,27 +1,49 @@
 import pandas as pd
 import glob
 import os
+import re
 
 def partition_DB(input_dir, output_dir, part_size, pref, remove):
     
     os.makedirs(output_dir, exist_ok=True)
     
-    csv_files = glob.glob(os.path.join(input_dir, '*.csv'))
+    # csv_files = glob.glob(os.path.join(input_dir, '*.csv'))
+    
+    files = [f for f in os.listdir(input_dir) if f.endswith(".csv")]
+    print(files)
+    
+    def file_sort_key(filename):
+        match = re.search(r'HAC_(\d+)(?:_(\d+))?', filename)
+        if match:
+            start = int(match.group(1))
+            end = int(match.group(2)) if match.group(2) else start
+            return (start, end)
+        return (float('inf'), float('inf'))
+    
+    sorted_files = sorted(files, key=file_sort_key)
+    
     part_data = []
     part_count = 0
     current_part_size = 0
 
-    for file in csv_files:
+    for file in sorted_files:
+        file = os.path.join(input_dir, file)
+        print(f"Processing file: {file}")
+        
         df = pd.read_csv(file)
+        print(f"Appending data to list")
         part_data.append(df)
         current_part_size += len(df)
+        print(f"Current data size: {current_part_size}")
     
+        print(f"Partitioning started for file: {file}")
         while int(current_part_size) >= int(part_size):
             combined_batch = pd.concat(part_data, ignore_index=True)
             batch_to_save = combined_batch.iloc[:part_size]
             remaining_data = combined_batch.iloc[part_size:]
     
             part_count += 1
+            print(f"Partition {part_count} added")
             output_file = os.path.join(output_dir,
                                        f'{pref}_partition_{part_count}.csv')
             print(f'Saved {output_file}')
