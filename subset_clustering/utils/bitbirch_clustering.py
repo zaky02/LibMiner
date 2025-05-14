@@ -32,7 +32,6 @@ def fold_fingerprint(fp, fpsize):
     half_n = fpsize // 2
     first_half = fp[:half_n]
     second_half = fp[half_n:]
-
     folded_fp = np.logical_or(first_half, second_half).astype(np.uint8)
 
     del half_n, first_half, second_half
@@ -44,17 +43,23 @@ def generate_fingerprints(smiles_list, file_id, fpsize, verbose):
     """
     process_id = os.getpid()
     process = psutil.Process(process_id)
-    
     fpgen = rdFingerprintGenerator.GetMorganGenerator(radius=4, fpSize=fpsize)
-    
+    #fpgen = rdFingerprintGenerator.GetRDKitFPGenerator(fpSize=fpsize)
+
     fps = np.empty((len(smiles_list), fpsize // 4), dtype=np.uint8)
+    #fps = np.empty((len(smiles_list), fpsize // 8), dtype=np.uint8)
     for i, smile in enumerate(smiles_list):
         mol = MolFromSmiles(smile)
+        if mol is None:
+            if verbose:
+                print(f"Invalid SMILES at index {i} in {file_id}: {smile}")
+            continue
         fp = fpgen.GetFingerprintAsNumPy(mol)
-        fp = fold_fingerprint(fp, fpsize)
-        fp = fold_fingerprint(fp, fpsize // 2)
+        fp = fold_fingerprint(fp, len(fp))
+        fp = fold_fingerprint(fp, len(fp))
+        #fp = fold_fingerprint(fp, len(fp))
         fps[i] = fp
-
+        
         if i % 5000 == 0 and i != 0 and verbose:
             print(f'{i}/{len(smiles_list)} calc. fps for {file_id}')
             print(f"{process.memory_info().rss / (1024 ** 2):.2f} MB for {file_id}")
@@ -81,8 +86,8 @@ def get_bitbirch_clusters(df, file_id, fpsize, bf, thr, verbose):
     fps = generate_fingerprints(df.SMILES, file_id, fpsize, verbose)
     timer_fps.stop()
     
-    mem_fps = get_object_memory(fps)
     if verbose:
+        mem_fps = get_object_memory(fps)
         print(f'[PROCESS {process_id}] {mem_fps} MB of memory ocupied by fps ({file_id})')
         print(f"[PROCESS {process_id}] {process.memory_info().rss / (1024 ** 2):.2f} MB of memory used after calculating fps ({file_id})")
     
