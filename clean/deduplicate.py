@@ -9,31 +9,49 @@ from pathlib import Path
 # 1️⃣ Setup RDKit tools
 # -------------------------
 RDLogger.DisableLog('rdApp.*')
-uncharger = rdMolStandardize.Uncharger()
-lfs = rdMolStandardize.LargestFragmentChooser()
 
 def normalize_smiles(smi: str) -> str | None:
-    """Parse, remove salts, uncharge, sanitize, canonicalize
+    """Normalize SMILES by:
+    - Converting to canonical isomeric SMILES
+    - Removing salts (keeping largest fragment)
+    - Neutralizing charges
     
     Parameters
     ----------
     smi : str
-        SMILES string
-    """
+        Input SMILES string
+        
+    Returns
+    ------- 
+    str | None
+        Normalized canonical SMILES or None if invalid
+    """ 
     if not smi:
         return None
+    
     try:
-        mol = Chem.MolFromSmiles(smi, sanitize=False)
+        mol = Chem.MolFromSmiles(smi, sanitize=True)
         if mol is None:
             return None
-        mol = lfs.choose(mol)
-        mol = uncharger.uncharge(mol)
-        Chem.SanitizeMol(mol)
+        # Apply salt removal only if multiple fragments
+        if "." in smi:
+            lfs = rdMolStandardize.LargestFragmentChooser()
+            mol = lfs.choose(mol)
+
+        # Apply uncharging only if charges are present
+        if "+" in smi or "-" in smi:
+            uncharger = rdMolStandardize.Uncharger()
+            mol = uncharger.uncharge(mol)
+        
+        if "." in smi or "+" in smi or "-" in smi:    
+            Chem.SanitizeMol(mol)          # ensure valid again after modifications
+
         return Chem.MolToSmiles(mol, canonical=True, isomericSmiles=True)
     except Exception:
         return None
+    
 
-def get_hac(smi: str) -> int | None:
+def get_hac(smi: str) -> int:
     """Calculate Heavy Atom Count (HAC) from SMILES
     
     Parameters
@@ -109,7 +127,7 @@ ddf_merged = ddf_merged.drop_duplicates(subset="canonical_smiles")
 # 4️⃣ Write the database
 # -------------------------
 # Lazy group by HAC
-def rename_partitions(output_folder: Path, hac: int):
+def rename_partitions(output_folder: Path | str, hac: int):
     """Rename partitions to HAC_xx_01.parquet, HAC_xx_02.parquet, etc.
     
     Parameters
@@ -119,6 +137,8 @@ def rename_partitions(output_folder: Path, hac: int):
     output_folder : Path
         Output folder path
     """
+    output_folder = Path(output_folder)
+    output_folder.mkdir(parents=True, exist_ok=True)
     files = sorted(Path(f"{output_folder}/HAC_{hac:02d}").glob("*.parquet"))
     for i, f in enumerate(files, start=1):
         new_name = output_folder / f"HAC_{hac:02d}/HAC{hac:02d}_{i:02d}.parquet"
