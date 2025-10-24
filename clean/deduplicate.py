@@ -1,14 +1,15 @@
 from pathlib import Path
 import os
 import time
+import argparse
+import pandas as pd
+import hashlib, struct
+from collections import defaultdict
 import dask.dataframe as dd
 from rdkit import Chem
 from rdkit.Chem.MolStandardize import rdMolStandardize
 from rdkit import RDLogger
 from dask.distributed import Client, performance_report
-import argparse
-import pandas as pd
-
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Deduplicate SMILES')
@@ -169,17 +170,11 @@ def write_db_by_hac(db_id: str, pattern: str, output_folder: Path,
     meta = {
     "ID": "string",
     "SMILES": "string",
-    "db_id": "string",
     "HAC": "int64",
     }
-    
-    group_id = db_id
-    if "002" in db_id:
-        group_id = db_id.split("_")[0]
 
     ddf = dd.read_csv(pattern, blocksize=blocksize, usecols=["ID","SMILES"])
     ddf = ddf.dropna(subset=["SMILES"])
-    ddf["db_id"] = group_id
 
     # Normalize SMILES
     ddf["SMILES"] = ddf.map_partitions(lambda df: df["SMILES"].map(normalize_smiles), meta=("SMILES", str))
@@ -221,7 +216,7 @@ def rename_partitions(output_folder: Path):
 
             # Move and rename parquet files
             for i, parquet_file in enumerate(hac_folder.glob("*.parquet"), start=1):
-                new_name = new_hac_folder / f"HAC_{hac_value}_db{db_folder.name.split("_")[0]}_{i:02d}.parquet"
+                new_name = new_hac_folder / f"HAC{hac_value}_db{db_folder.name.split("_")[0]}_{i:02d}.parquet"
                 parquet_file.rename(new_name)
             # Remove old HAC folder
             if not any(hac_folder.iterdir()):
@@ -256,7 +251,30 @@ def check_files(pattern: list[str], db_id: str) -> list[str]:
             wrong.writelines(wrong_files)
             
     return right_files
+        
                                         
+def make_packed_id(s: str, db_id: int, hac: int,
+                   db_bits: int = 5, hac_bits: int = 10, hash_bits: int = 49) -> int:
+    """Pack db_id, HAC, and a truncated hash into a single 64-bit integer.
+        The db_bits determine the maximum number allowed -> for db_bits of 5. It means db_id can
+        be up to 2^db_bits -> 32 databases.
+        2^hac_bits for up to 1024 HAC counts
+        The hash_bits controls the uniqueness of the IDs generated -> there could be collisions with the same hash IDs although it  might be improbable for them to also have the same HAC and db_id
+    
+    """
+    assert db_id < (1 << db_bits)
+    assert hac < (1 << hac_bits)
+    h = hashlib.blake2b(s.encode("utf-8"), digest_size=8)
+    full_hash = struct.unpack(">Q", h.digest())[0]
+    hash_part = full_hash & ((1 << hash_bits) - 1)
+    packed = (db_id << (hac_bits + hash_bits)) | (hac << hash_bits) | hash_part
+    return packed
+
+
+def make_name_function(db_id: int, hac: int):
+    def name_function(i: int) -> str:
+        return f"HAC{hac}_db{db_id}_{i:02d}.parquet"
+    return name_function
 
 # -------------------------
 # 2️⃣ Read databases lazily
@@ -303,23 +321,42 @@ def main():
     # -------------------------
 
         end = time.perf_counter()
-        print(f"Initial cleaning completed in {end - start:.2f} seconds")       
-
-        for hac_folder in out_path.glob("HAC*"):
-            ddf_merged = dd.read_parquet(f"{hac_folder}/*.parquet", chunksize=block_size, 
+        print(f"Initial cleaning completed in {end - start:.2f} seconds")   
+        
+        groups = defaultdict(list) 
+        folders = out_path.glob("HAC*/*.parquet")
+        for p in folders:
+            # Extract identifier — customize this part as needed
+            hac = int(p.name.split("_")[0].strp("HAC"))   # e.g., "001"
+            db = int(p.name.split("_")[1].strp("db"))
+            groups[(db, hac)].append(p)
+            
+        for (db, hac), files in groups.items():
+            
+            meta = {
+                "ID": "int64",
+                "SMILES": "string",
+                }
+            
+            ddf_merged = dd.read_parquet(files, chunksize=block_size, 
                                         columns=["ID","SMILES"])
 
             # Deduplicate across all sources using normalized SMILES
             ddf_merged = ddf_merged.drop_duplicates(subset="SMILES")
+            ddf_merged["ID"] = ddf_merged.map_partitions(lambda df: df["ID"].apply(make_packed_id, db_id=db, hac=hac), meta=("ID", int))
             # Aim for ≤15M rows per partition because this is for each HAC
             ddf_merged = ddf_merged.repartition(partition_size="800MB")
+            ddf_merged = ddf_merged.astype(meta)
             # -------------------------
             # 4️⃣ Write the database
             # -------------------------
             ddf_merged.to_parquet(
-                out_path / f"cleaned/{hac_folder.name}",
+                out_path / f"cleaned/{hac}",
                 write_index=False,
                 compute=True,
+                engine="pyarrow",
+                name_function=make_name_function(db_id=db, hac=hac)
+                
             )
             
         end2 = time.perf_counter()
