@@ -23,10 +23,6 @@ def parse_args():
     args = parser.parse_args()
     return args.input_path, args.output_smi, args.batch_size, args.fp_size, args.output_hdf
 
-# -------------------------
-# 1️⃣ Setup RDKit tools
-# -------------------------
-RDLogger.DisableLog('rdApp.*')
 
 @ray.remote
 def convert_parquet_to_smi_chunk(parquet_path, out_dir, smiles_col="SMILES", id_col="ID", 
@@ -91,7 +87,9 @@ def ray_parquet_to_smi(parquet_files, out_smi, smiles_col="SMILES", id_col="ID",
     
 
 def main():
+    
     input_folder, output_smi, batch_size, fp_size, output_hdf = parse_args()
+    RDLogger.DisableLog('rdApp.*')
     
     start = time.perf_counter()
     ray.init(ignore_reinit_error=True, log_to_driver=False)
