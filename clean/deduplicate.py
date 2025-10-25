@@ -66,12 +66,21 @@ def normalize_smiles(smi: str) -> str | None:
             uncharger = rdMolStandardize.Uncharger()
             mol = uncharger.uncharge(mol)
         
-        if "." in smi or "+" in smi or "-" in smi:    
-            Chem.SanitizeMol(mol)      # ensure valid again after modifications, it is in place
+        Chem.SanitizeMol(mol)      # ensure valid again after modifications, it is in place
 
         return Chem.MolToSmiles(mol, canonical=True, isomericSmiles=True)
     except Exception:
         return None
+    
+    
+def normalize_smiles_partition(smiles_series: pd.Series) -> pd.Series:
+    """Vectorized normalization per partition."""
+    return pd.Series(
+        [normalize_smiles(smi) for smi in smiles_series],
+        index=smiles_series.index,
+        dtype="string",
+    )
+
 
 def get_hac(smiles_series):
     """Compute HAC for a pandas Series of SMILES in a vectorized partition."""
@@ -178,7 +187,7 @@ def write_db_by_hac(db_id: str, pattern: str, output_folder: Path,
     ddf = ddf.dropna(subset=["SMILES"])
 
     # Normalize SMILES
-    ddf["SMILES"] = ddf.map_partitions(lambda df: df["SMILES"].map(normalize_smiles), meta=("SMILES", str))
+    ddf["SMILES"] = ddf.map_partitions(lambda df: normalize_smiles_partition(df["SMILES"]), meta=("SMILES", str))
     ddf = ddf.dropna(subset=["SMILES"])
     ddf["db_id"] = group_id
     
