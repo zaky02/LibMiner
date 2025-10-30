@@ -13,10 +13,10 @@ from dask.distributed import Client, performance_report
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Deduplicate SMILES')
-    parser.add_argument('-bs', '--blocksize', type=str, help='Block size for dask dataframe. The safest is the default 128MB',  required=False, default='128MB')
+    parser.add_argument('-bs', '--blocksize', type=str, help='Block size for dask dataframe. The safest is the default 128MB',  required=False, default='64MB')
     parser.add_argument('-o','--output_path', type=str, help='Output foldr for the database', required=False,
                         default='Molecular_database')
-    parser.add_argument('-s', '--group_size', type=int, help='The size of the file groups to read at once, default is 250 Gb', required=False, default=250)
+    parser.add_argument('-s', '--group_size', type=int, help='The size of the file groups to read at once, default is 300 Gb', required=False, default=300)
     args = parser.parse_args()
     return args.blocksize, args.output_path, args.group_size
 
@@ -91,7 +91,7 @@ def get_hac(smiles_series):
 
 def split_csv_groups_by_size(
     base_paths: dict[str, list[str, list[str]]],
-    size_limit_gb: int = 250
+    size_limit_gb: int = 300
 ) -> dict[str, list[str]]:
     """
     Dynamically split large CSV datasets into groups of ~size_limit_gb.
@@ -150,8 +150,9 @@ def split_csv_groups_by_size(
 
     return new_mapping
 
+
 def write_db_by_hac(db_id: str, pattern: str, output_folder: Path, 
-                    blocksize="128MB") -> None:
+                    blocksize="64MB", use_cols: tuple[str] = ("ID", "SMILES")) -> None:
     """
     Normalize SMILES, deduplicate locally,
     split by HAC, and write to HAC-specific Parquet folders.
@@ -183,7 +184,7 @@ def write_db_by_hac(db_id: str, pattern: str, output_folder: Path,
     if "002" in db_id:
         group_id = db_id.split("_")[0]
 
-    ddf = dd.read_csv(pattern, blocksize=blocksize, usecols=["ID","SMILES"])
+    ddf = dd.read_csv(pattern, blocksize=blocksize, usecols=list(use_cols))
     ddf = ddf.dropna(subset=["SMILES"])
 
     # Normalize SMILES
@@ -238,7 +239,7 @@ def rename_partitions(output_folder: Path):
             db_folder.rmdir()
 
            
-def check_files(pattern: list[str], db_id: str) -> list[str]:
+def check_files(pattern: list[str], db_id: str, use_cols: tuple[str] = ("ID", "SMILES")) -> list[str]:
     """
     Check if all files in pattern contain ID and SMILES columns
     """
@@ -247,7 +248,7 @@ def check_files(pattern: list[str], db_id: str) -> list[str]:
     for f in pattern:
         try:
             cols = pd.read_csv(f, nrows=0).columns
-            if not all(c in cols for c in ["ID", "SMILES"]):
+            if not all(c in cols for c in use_cols):
                 wrong_files.append(f"{f}\n") 
                 continue
         except Exception as e:
@@ -316,10 +317,54 @@ def make_name_function(hac: int):
         return f"HAC{hac}_{i:02d}.parquet"
     return name_function
 
+def deduplicate(hac_folders: Path | str, block_size: str, out_path: Path | str, 
+                use_cols: tuple[str] = ("ID", "SMILES")):
+    """
+    Normalize SMILES, deduplicate locally,
+    split by HAC, and write to HAC-specific Parquet folders.
+    """
+    
+    out_path = Path(out_path)
+    hac_folders = Path(hac_folders)
+    hac = hac_folders.name.split("_")[-1]
+    meta = {"ID": "uint64", "SMILES": "string", "db_id": "string"}
+    stats = Path("stats.txt")
+    stats.touch(exist_ok=True)
+    
+    # read parquet files from a HAC  
+    ddf_merged = dd.read_parquet(f"{hac_folders}/*.parquet", blocksize=block_size, 
+                                columns=[*use_cols, "db_id"])
+
+    # Deduplicate across all sources using normalized SMILES
+    ddf_merged = ddf_merged.drop_duplicates(subset="SMILES").drop_duplicates(subset=["ID"])
+    # Apply to Dask DataFrame
+    ddf_merged["ID"] = ddf_merged.map_partitions(
+    lambda df: pd.Series(encode_id(df, hac=int(hac)), index=df.index),
+    meta=("ID", "uint64"))
+    
+    ddf_merged = ddf_merged.astype(meta)
+    # Aim for ≤15M rows per partition because this is for each HAC
+    ddf_merged = ddf_merged.repartition(partition_size="500MB")
+    size = ddf_merged.shape[0]
+    # -------------------------
+    # 4️⃣ Write the database
+    # -------------------------
+    ddf_merged.to_parquet(
+        out_path / f"cleaned/{hac}",
+        write_index=False,
+        compute=True,
+        engine="pyarrow",
+        name_function=make_name_function(hac=int(hac))
+        
+    )
+    
+    with open(stats, "a") as w:
+        w.write(f"HAC {hac}: {size}\n")
+
 # -------------------------
 # 2️⃣ Read databases lazily
 # -------------------------
-base_db = { "001": "Enamine/*_clean.csv",
+base_db = { "001": "Enamine_REAL_65B/Enamine_REAL_65B_partitioned_15M/*.csv",
             "002": "ZINC22/smiles_csv/H*/*_clean.csv",  # H04_to_H24
             "003": "Savi/*/*_clean.csv",
             "004": "PubChem/*_clean.csv",
@@ -363,42 +408,15 @@ def main():
         end = time.perf_counter()
         print(f"Initial cleaning completed in {end - start:.2f} seconds")  
          
-        meta = {"ID": "uint64", "SMILES": "string", "db_id": "string"}
-        stats = Path("stats.txt")
-        stats.touch(exist_ok=True)
+
         for hac_folders in out_path.glob("HAC*"):
             hac = hac_folders.name.split("_")[-1]
             if f"HAC {hac}" in progress.read_text():
                 print(f"HAC {hac} already done, skipping.")            
-                continue   
-            ddf_merged = dd.read_parquet(f"{hac_folders}/*.parquet", chunksize=block_size, 
-                                        columns=["ID", "SMILES", "db_id"])
-
-            # Deduplicate across all sources using normalized SMILES
-            ddf_merged = ddf_merged.drop_duplicates(subset="SMILES").drop_duplicates(subset=["ID"])
-            # Apply to Dask DataFrame
-            ddf_merged["ID"] = ddf_merged.map_partitions(
-            lambda df: pd.Series(encode_id(df, hac=int(hac)), index=df.index),
-            meta=("ID", "uint64"))
-            
-            ddf_merged = ddf_merged.astype(meta)
-            # Aim for ≤15M rows per partition because this is for each HAC
-            ddf_merged = ddf_merged.repartition(partition_size="500MB")
-            size = ddf_merged.shape[0]
-            # -------------------------
-            # 4️⃣ Write the database
-            # -------------------------
-            ddf_merged.to_parquet(
-                out_path / f"cleaned/{hac}",
-                write_index=False,
-                compute=True,
-                engine="pyarrow",
-                name_function=make_name_function(hac=int(hac))
-                
-            )
-            
-            with open(stats, "a") as w:
-                w.write(f"HAC {hac}: {size}\n")
+                continue
+            deduplicate(hac_folders, block_size, out_path)
+            with open(progress, "a") as f:
+                f.write(f"HAC {hac} done\n")
                 
         end2 = time.perf_counter()
         print(f"Completed in {end2 - end:.2f} seconds")
