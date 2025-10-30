@@ -17,8 +17,10 @@ def parse_args():
     parser.add_argument('-o','--output_path', type=str, help='Output foldr for the database', required=False,
                         default='Molecular_database')
     parser.add_argument('-s', '--group_size', type=int, help='The size of the file groups to read at once, default is 300 Gb', required=False, default=300)
+    parser.add_argument("-c", "--use_cols", nargs="+", help="Columns to read", required=False, 
+                        default=['ID', "SMILES"])
     args = parser.parse_args()
-    return args.blocksize, args.output_path, args.group_size
+    return args.blocksize, args.output_path, args.group_size, args.use_cols
 
 # -------------------------
 #  ️ Setup Dask cluster in Slurm
@@ -73,20 +75,18 @@ def normalize_smiles(smi: str) -> str | None:
         return None
     
     
-def normalize_smiles_partition(smiles_series: pd.Series) -> pd.Series:
-    """Vectorized normalization per partition."""
-    return pd.Series(
-        [normalize_smiles(smi) for smi in smiles_series],
-        index=smiles_series.index,
-        dtype="string",
-    )
 
 
-def get_hac(smiles_series):
-    """Compute HAC for a pandas Series of SMILES in a vectorized partition."""
-    mols = [Chem.MolFromSmiles(smi) for smi in smiles_series]
-    hacs = [mol.GetNumHeavyAtoms() if mol else 0 for mol in mols]
-    return pd.Series(hacs, index=smiles_series.index)
+def get_hac(smi: str) -> int:
+    """Calculate Heavy Atom Count (HAC) from SMILES
+    
+    Parameters
+    ----------
+    smi : str
+        SMILES string
+    """
+    mol = Chem.MolFromSmiles(smi)
+    return mol.GetNumHeavyAtoms() if mol else 0
 
 
 def split_csv_groups_by_size(
@@ -188,12 +188,12 @@ def write_db_by_hac(db_id: str, pattern: str, output_folder: Path,
     ddf = ddf.dropna(subset=["SMILES"])
 
     # Normalize SMILES
-    ddf["SMILES"] = ddf.map_partitions(lambda df: normalize_smiles_partition(df["SMILES"]), meta=("SMILES", str))
+    ddf["SMILES"] = ddf.map_partitions(lambda df: df["SMILES"].map(normalize_smiles), meta=("SMILES", str))
     ddf = ddf.dropna(subset=["SMILES"])
     ddf["db_id"] = group_id
     
     # HAC calculation
-    ddf["HAC"] = ddf.map_partitions(lambda df: get_hac(df["SMILES"]), meta=("HAC", int))
+    ddf["HAC"] = ddf.map_partitions(lambda df: df["SMILES"].map(get_hac), meta=("HAC", int))
     ddf = ddf.astype(meta)
     # Write all partitions in parallel, grouped by HAC
     ddf.to_parquet(
@@ -317,7 +317,8 @@ def make_name_function(hac: int):
         return f"HAC{hac}_{i:02d}.parquet"
     return name_function
 
-def deduplicate(hac_folders: Path | str, block_size: str, out_path: Path | str, 
+
+def deduplicator(hac_folders: Path | str, out_path: Path | str, block_size: str = "64MB",
                 use_cols: tuple[str] = ("ID", "SMILES")):
     """
     Normalize SMILES, deduplicate locally,
@@ -379,7 +380,7 @@ base_db = { "001": "Enamine_REAL_65B/Enamine_REAL_65B_partitioned_15M/*.csv",
         }
 
 def main():
-    block_size, output_folder, group_size = parse_args()
+    block_size, output_folder, group_size, use_cols = parse_args()
     
     start = time.perf_counter()
     
@@ -391,11 +392,11 @@ def main():
         progress = Path("progress.txt")
         progress.touch(exist_ok=True)
         for db_id, pattern in db_files.items():
-            pattern = check_files(pattern, db_id)    
+            pattern = check_files(pattern, db_id, use_cols)    
             if f"DB {db_id} done\n" in progress.read_text():
                 print(f"DB {db_id} already done, skipping.")            
                 continue
-            write_db_by_hac(db_id, pattern, out_path, block_size)
+            write_db_by_hac(db_id, pattern, out_path, block_size, use_cols)
             with open(progress, "a") as f:
                 f.write(f"DB {db_id} done\n")
 
@@ -414,7 +415,7 @@ def main():
             if f"HAC {hac}" in progress.read_text():
                 print(f"HAC {hac} already done, skipping.")            
                 continue
-            deduplicate(hac_folders, block_size, out_path)
+            deduplicator(hac_folders, out_path, block_size, use_cols)
             with open(progress, "a") as f:
                 f.write(f"HAC {hac} done\n")
                 
