@@ -263,53 +263,21 @@ def check_files(pattern: list[str], db_id: str, use_cols: tuple[str] = ("ID", "S
             wrong.writelines(wrong_files)
             
     return right_files
-        
-                                        
-def encode_id(df, hac: int, db_bits=5, hac_bits=10, hash_bits=49):
+                             
+
+def assign_ids(df, partition_offsets, global_offset, meta):
     """
-    Vectorized 64-bit packed ID generation using 128-bit blake2b hash folded to 64 bits.
-
-    Combines db_id, HAC, and a 49-bit hash into a unique 64-bit integer.
-    When generating the search database, it will make retrieving the molecules more easily.
-
-    Parameters
-    ----------
-    df : DataFrame partition (must have columns 'ID' and 'db_id')
-    hac : int
-        Heavy atom count to embed
-    db_bits, hac_bits, hash_bits : int
-        Bit allocation (must sum to <= 64)
+    Assign unique sequential IDs per partition using map_partitions.
+    `partition_offsets` must be broadcast as list of integers.
     """
-    assert db_bits + hac_bits + hash_bits <= 64, "Bit allocations exceed 64 bits"
+    # Each partition gets its starting offset from partition_offsets
+    def add_ids(partition, partition_info=None):
+        pid = partition_info["number"]
+        offset = partition_offsets[pid]
+        partition["ID"] = np.arange(len(partition), dtype=np.int64) + global_offset + offset
+        return partition
 
-    ids = df["ID"].to_numpy(dtype=str)
-    db_ids = df["db_id"].to_numpy(dtype=np.uint64)
-    n = len(ids)
-
-    # Masks and shifts
-    hash_mask = np.uint64((1 << hash_bits) - 1)
-    db_mask   = np.uint64((1 << db_bits) - 1)
-    db_shift  = np.uint64(hac_bits + hash_bits)
-    hac_shift = np.uint64(hash_bits)
-    hac_arr   = np.full(n, np.uint64(hac), dtype=np.uint64)
-
-    # Ensure db_id fits allocated bits
-    db_ids = db_ids & db_mask
-    assert np.all(db_ids < (1 << db_bits)), f"db_id exceeds {2**db_bits-1}"
-
-    # Generate 128-bit Blake2b hash and fold into 64 bits
-    full_hashes = np.empty(n, dtype=np.uint64)
-    for i, s in enumerate(ids):
-        h = hashlib.blake2b(s.encode("utf-8"), digest_size=16).digest()
-        hi, lo = struct.unpack(">QQ", h)
-        full_hashes[i] = np.uint64(hi ^ lo)
-
-    # Keep only hash_bits bits
-    hash_parts = full_hashes & hash_mask
-
-    # Pack fields: [db_id | HAC | hash_part]
-    packed_ids = (db_ids << db_shift) | (hac_arr << hac_shift) | hash_parts
-    return packed_ids
+    return df.map_partitions(add_ids, meta=meta)
 
 
 def make_name_function(hac: int):
@@ -319,34 +287,33 @@ def make_name_function(hac: int):
 
 
 def deduplicator(hac_folders: Path | str, out_path: Path | str, block_size: str = "64MB",
-                use_cols: tuple[str] = ("ID", "SMILES")):
+                 use_cols: tuple[str] = ("ID", "SMILES"), current_offset: int = 0):
     """
-    Normalize SMILES, deduplicate locally,
-    split by HAC, and write to HAC-specific Parquet folders.
+    deduplicate, assign unique numerical IDs and write to HAC-specific Parquet folders.
     """
     
     out_path = Path(out_path)
     hac_folders = Path(hac_folders)
     hac = hac_folders.name.split("_")[-1]
-    meta = {"ID": "uint64", "SMILES": "string", "db_id": "string"}
-    stats = Path("stats.txt")
-    stats.touch(exist_ok=True)
+    meta = {"ID": "uint64", "SMILES": "string"}
     
     # read parquet files from a HAC  
     ddf_merged = dd.read_parquet(f"{hac_folders}/*.parquet", blocksize=block_size, 
-                                columns=[*use_cols, "db_id"])
+                                columns=use_cols)
 
     # Deduplicate across all sources using normalized SMILES
     ddf_merged = ddf_merged.drop_duplicates(subset="SMILES").drop_duplicates(subset=["ID"])
-    # Apply to Dask DataFrame
-    ddf_merged["ID"] = ddf_merged.map_partitions(
-    lambda df: pd.Series(encode_id(df, hac=int(hac)), index=df.index),
-    meta=("ID", "uint64"))
     
-    ddf_merged = ddf_merged.astype(meta)
     # Aim for ≤15M rows per partition because this is for each HAC
     ddf_merged = ddf_merged.repartition(partition_size="500MB")
-    size = ddf_merged.shape[0]
+
+    # Compute number of rows per partition (fast metadata op)
+    partition_lengths = ddf_merged.map_partitions(len).compute()
+    partition_offsets = np.insert(np.cumsum(partition_lengths[:-1]), 0, 0)
+    # Assign unique IDs within Dask graph (no Python loop)
+    ddf_merged = assign_ids(ddf_merged, partition_offsets, current_offset, meta)
+    count = int(sum(partition_lengths))
+    
     # -------------------------
     # 4️⃣ Write the database
     # -------------------------
@@ -355,12 +322,10 @@ def deduplicator(hac_folders: Path | str, out_path: Path | str, block_size: str 
         write_index=False,
         compute=True,
         engine="pyarrow",
-        name_function=make_name_function(hac=int(hac))
-        
+        name_function=make_name_function(hac=int(hac))     
     )
     
-    with open(stats, "a") as w:
-        w.write(f"HAC {hac}: {size}\n")
+    return count
 
 # -------------------------
 # 2️⃣ Read databases lazily
@@ -399,26 +364,37 @@ def main():
             write_db_by_hac(db_id, pattern, out_path, block_size, use_cols)
             with open(progress, "a") as f:
                 f.write(f"DB {db_id} done\n")
-
+                
         rename_partitions(out_path)
-        
+            
+        end = time.perf_counter()
+        print(f"Initial cleaning completed in {end - start:.2f} seconds")    
     # -------------------------
     # 3️⃣ Deduplicate globally by HAC
     # -------------------------
-
-        end = time.perf_counter()
-        print(f"Initial cleaning completed in {end - start:.2f} seconds")  
-         
-
-        for hac_folders in out_path.glob("HAC*"):
+        stats = Path("stats.txt")
+        stats.touch(exist_ok=True)
+        current_offset = 0   
+        
+        hacs = sorted(out_path.glob("HAC*"), key=lambda x: int(x.name.split("_")))
+        for hac_folders in hacs:
             hac = hac_folders.name.split("_")[-1]
             if f"HAC {hac}" in progress.read_text():
-                print(f"HAC {hac} already done, skipping.")            
+                print(f"HAC {hac} already done, skipping.")
+                with open(stats, "r") as st:
+                    total_count = sum([int(x.strip().split(":")[-1]) for x in st.readlines()])
+                current_offset = current_offset + total_count       
                 continue
-            deduplicator(hac_folders, out_path, block_size, use_cols)
+            
+            count = deduplicator(hac_folders, out_path, block_size, use_cols, current_offset)
+            current_offset = current_offset + count
+            
             with open(progress, "a") as f:
                 f.write(f"HAC {hac} done\n")
                 
+            with open(stats, "a") as w:
+                w.write(f"HAC {hac}: {count}\n")
+                        
         end2 = time.perf_counter()
         print(f"Completed in {end2 - end:.2f} seconds")
 
