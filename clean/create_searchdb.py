@@ -20,8 +20,10 @@ def parse_args():
                         default=512)
     parser.add_argument('-oh', '--output_hdf', type=str, help='The output .h5 filename', 
                         required=False, default='fp_db.h5')
+    parser.add_argument("-c", "--cpus", type=int, help="number of processors to run the create_db_file_parallel",
+                        default=4)
     args = parser.parse_args()
-    return args.input_path, args.output_smi, args.batch_size, args.fp_size, args.output_hdf
+    return args.input_path, args.output_smi, args.batch_size, args.fp_size, args.output_hdf, args.cpus
 
 
 @ray.remote
@@ -38,16 +40,16 @@ def convert_parquet_to_smi_chunk(parquet_path, out_dir, smiles_col="SMILES", id_
     with open(smi_temp, "w", encoding="utf-8") as f:
         for batch in parquet_file.iter_batches(columns=[smiles_col, id_col], batch_size=batch_size):
             df = batch.to_pandas()
-            lines = [f"{row[smiles_col]} {(row[id_col])}" for _, row in df.iterrows()]
+            lines = [f"{row[smiles_col]} {(row[id_col])}\n" for _, row in df.iterrows()]
             buffer.extend(lines)
 
             # Flush periodically to keep memory small
-            if len(buffer) >= 100_000_000:
-                f.write("\n".join(buffer) + "\n")
+            if len(buffer) >= 1_500_000:
+                f.writelines(buffer)
                 buffer.clear()
 
         if buffer:
-            f.write("\n".join(buffer) + "\n")
+            f.writelines(buffer)
 
     return str(smi_temp)
 
@@ -88,7 +90,7 @@ def ray_parquet_to_smi(parquet_files, out_smi, smiles_col="SMILES", id_col="ID",
 
 def main():
     
-    input_folder, output_smi, batch_size, fp_size, output_hdf = parse_args()
+    input_folder, output_smi, batch_size, fp_size, output_hdf, cpus = parse_args()
     RDLogger.DisableLog('rdApp.*')
     
     start = time.perf_counter()
@@ -106,7 +108,7 @@ def main():
     fp_type="Morgan", 
     fp_params={"radius": 2, "fpSize": fp_size}, 
     full_sanitization=False, 
-    num_processes=4
+    num_processes=cpus
 )
     
     Path(output_smi).unlink(missing_ok=True)

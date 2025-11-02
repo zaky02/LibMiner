@@ -372,18 +372,18 @@ def main():
     # -------------------------
     # 3️⃣ Deduplicate globally by HAC
     # -------------------------
-        stats = Path("stats.txt")
+        stats = out_path/"stats.txt"
         stats.touch(exist_ok=True)
         current_offset = 0   
-        
-        hacs = sorted(out_path.glob("HAC*"), key=lambda x: int(x.name.split("_")))
+        with open(stats, "r") as st:
+            lines = {int(x.split(":")[0].strip("HAC")): int(x.strip().split(":")[-1]) for x in st.readlines()}
+            
+        hacs = sorted(out_path.glob("HAC*"), key=lambda x: int(x.name.split("_")[-1]))
         for hac_folders in hacs:
             hac = hac_folders.name.split("_")[-1]
             if f"HAC {hac}" in progress.read_text():
-                print(f"HAC {hac} already done, skipping.")
-                with open(stats, "r") as st:
-                    total_count = sum([int(x.strip().split(":")[-1]) for x in st.readlines()])
-                current_offset = current_offset + total_count       
+                print(f"HAC {hac} already done, skipping.")  
+                current_offset = current_offset + lines[int(hac)]       
                 continue
             
             count = deduplicator(hac_folders, out_path, block_size, use_cols, current_offset)
