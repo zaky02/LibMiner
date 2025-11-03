@@ -13,7 +13,7 @@ from dask.distributed import Client, performance_report
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Deduplicate SMILES')
-    parser.add_argument('-bs', '--blocksize', type=str, help='Block size for dask dataframe. The safest is the default 128MB',  required=False, default='64MB')
+    parser.add_argument('-bs', '--blocksize', type=str, help='Block size for dask dataframe. The safest is the default 64MB',  required=False, default='64MB')
     parser.add_argument('-o','--output_path', type=str, help='Output foldr for the database', required=False,
                         default='Molecular_database')
     parser.add_argument('-s', '--group_size', type=int, help='The size of the file groups to read at once, default is 300 Gb', required=False, default=300)
@@ -221,12 +221,15 @@ def rename_partitions(output_folder: Path):
         # Inside each db_id, look for HAC=* folders
         for hac_folder in db_folder.glob("HAC=*"):
             hac_value = hac_folder.name.split("=")[-1]
-            new_hac_folder = output_folder / f"HAC_{hac_value}"
-            new_hac_folder.mkdir(exist_ok=True, parents=True)
+            if "0" in hac_value :
+                new_hac_folder = output_folder / f"wrong_HAC_{hac_value}"
+            else:
+                new_hac_folder = output_folder / f"HAC_{hac_value}"
+                new_hac_folder.mkdir(exist_ok=True, parents=True)
 
             # Move and rename parquet files
             for i, parquet_file in enumerate(hac_folder.glob("*.parquet"), start=1):
-                new_name = new_hac_folder / f"HAC{hac_value}_db{db_folder.name.split("_")[0]}_{i:02d}.parquet"
+                new_name = new_hac_folder / f"HAC{hac_value}_db{db_folder.name}_{i:02d}.parquet"
                 parquet_file.rename(new_name)
             # Remove old HAC folder
             if not any(hac_folder.iterdir()):
@@ -290,7 +293,7 @@ def main():
         # Batch size can match #workers if desired, but each DB is processed fully partitioned
         out_path = Path(output_folder)
         out_path.mkdir(parents=True, exist_ok=True)
-        progress = Path("progress.txt")
+        progress = Path("progress_processing.txt")
         progress.touch(exist_ok=True)
         for db_id, pattern in db_files.items():
             pattern = check_files(pattern, db_id, use_cols)    

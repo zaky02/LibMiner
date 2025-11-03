@@ -54,7 +54,7 @@ def convert_parquet_to_smi_chunk(parquet_path, out_dir, smiles_col="SMILES", id_
     return str(smi_temp)
 
 
-def ray_parquet_to_smi(parquet_files, out_smi, smiles_col="SMILES", id_col="ID", batch_size=100_000):
+def ray_parquet_to_smi(parquet_files, out_smi, smiles_col="SMILES", id_col="num_ID", batch_size=100_000):
     """
     Convert multiple Parquet files to a single .smi file using Ray for concurrency.
     Each file is processed in parallel as a Ray task.

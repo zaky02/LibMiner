@@ -5,10 +5,11 @@ import argparse
 import numpy as np
 import dask.dataframe as dd
 from dask.distributed import Client, performance_report
+import json
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Deduplicate SMILES')
-    parser.add_argument('-bs', '--blocksize', type=str, help='Block size for dask dataframe. The safest is the default 128MB',  required=False, default='64MB')
+    parser.add_argument('-bs', '--blocksize', type=str, help='Block size for dask dataframe. The safest is the default 64 MB',  required=False, default='64MB')
     parser.add_argument('-o','--output_path', type=str, help='Output foldr for the database', required=False,
                         default='Molecular_database')
     parser.add_argument('-s', '--repartition_size', type=str, help='The size for each of the files default is 500MB', required=False, default="500MB")
@@ -64,10 +65,10 @@ def deduplicator(hac_folders: Path | str, out_path: Path | str, block_size: str 
     # read parquet files from a HAC  
     ddf_merged = dd.read_parquet(f"{hac_folders}/*.parquet", blocksize=block_size, 
                                 columns=[*use_cols, "db_id"])
-
-    # Deduplicate across all sources using normalized SMILES
-    ddf_merged = ddf_merged.drop_duplicates(subset="SMILES").drop_duplicates(subset=["ID"])
     
+    # Deduplicate across all sources using normalized SMILES
+    ddf_merged = ddf_merged.drop_duplicates(subset=["ID"])
+
     # Aim for ≤15M rows per partition because this is for each HAC
     ddf_merged = ddf_merged.repartition(partition_size=repartition_size)
 
@@ -107,11 +108,12 @@ def main():
         out_path.mkdir(parents=True, exist_ok=True)
         progress = Path("progress_deduplicate.txt")
         progress.touch(exist_ok=True)
-        stats = out_path/"stats.txt"
+        stats = out_path/"count_stats.txt"
         stats.touch(exist_ok=True)
         current_offset = 0   
         with open(stats, "r") as st:
-            lines = {int(x.split(":")[0].strip("HAC")): int(x.strip().split(":")[-1]) for x in st.readlines()}
+            lines = {int(x.split("#")[0].strip("HAC")): 
+                     int(x.strip().split("#")[-1]) for x in st.readlines()}
             
         hacs = sorted(out_path.glob("HAC*"), key=lambda x: int(x.name.split("_")[-1]))
         for hac_folders in hacs:
@@ -121,7 +123,8 @@ def main():
                 current_offset = current_offset + lines[int(hac)]       
                 continue
             
-            count = deduplicator(hac_folders, out_path, block_size, repartition_size, 
+            count = deduplicator(hac_folders, out_path, 
+                                 block_size, repartition_size, 
                                  use_cols, current_offset)
             
             current_offset = current_offset + count
@@ -130,7 +133,7 @@ def main():
                 f.write(f"HAC {hac} done\n")
                 
             with open(stats, "a") as w:
-                w.write(f"HAC {hac}: {count}\n")
+                w.write(f"HAC {hac}# {count}\n")
             
         end = time.perf_counter()
         print(f"Initial cleaning completed in {end - start:.2f} seconds")    
