@@ -2,13 +2,8 @@ from pathlib import Path
 import os
 import time
 import argparse
-import pandas as pd
-import hashlib, struct
 import numpy as np
 import dask.dataframe as dd
-from rdkit import Chem
-from rdkit.Chem.MolStandardize import rdMolStandardize
-from rdkit import RDLogger
 from dask.distributed import Client, performance_report
 
 def parse_args():
@@ -105,7 +100,7 @@ def main():
     
     start = time.perf_counter()
     
-    with performance_report(filename="dask-HAC.html"):
+    with performance_report(filename="dask-deduplicate.html"):
         
         # Batch size can match #workers if desired, but each DB is processed fully partitioned
         out_path = Path(output_folder)
