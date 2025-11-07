@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import argparse
 import json
+from collections import defaultdict
 
 
 def parse_args():
@@ -21,12 +22,20 @@ scheduler_address = os.environ["DASK_SCHEDULER_ADDRESS"]
 
 client = Client(scheduler_address)    # Connect to that cluster
 
-def compute_stats(hac_folders, block_size="64MB"):            # read parquet files from a HAC  
-    ddf_merged = dd.read_parquet(f"{hac_folders}/*.parquet", blocksize=block_size, 
-                                columns=["db_id", "SMILES"])
-                
-    sta = ddf_merged.groupby("db_id")["SMILES"].count().compute().to_dict()
-    return sta
+def compute_stats(hac_folders, block_size="64MB"):
+    # Read only necessary columns
+    ddf_merged = dd.read_parquet(f"{hac_folders}/*.parquet", blocksize=block_size,
+                                 columns=["db_id", "SMILES"])
+    
+    # Compute counts per db_id per partition
+    def partition_counts(df):
+        return df.groupby("db_id")["SMILES"].count()
+    
+    # this is a partition groupby
+    counts_per_partition = ddf_merged.map_partitions(partition_counts).compute()
+    
+    # Combine counts across partitions
+    return counts_per_partition.groupby("db_id").sum().to_dict()
 
 
 def main():

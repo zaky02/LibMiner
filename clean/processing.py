@@ -3,13 +3,12 @@ import os
 import time
 import argparse
 import pandas as pd
-import hashlib, struct
-import numpy as np
 import dask.dataframe as dd
 from rdkit import Chem
 from rdkit.Chem.MolStandardize import rdMolStandardize
 from rdkit import RDLogger
 from dask.distributed import Client, performance_report
+import pyarrow.parquet as pq
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Deduplicate SMILES')
@@ -119,7 +118,7 @@ def split_csv_groups_by_size(
             all_files.extend(Path().glob(str(pattern)))
 
         # Filter to only existing CSV files
-        all_files = [p for p in all_files if p.is_file() and p.suffix.lower() == ".csv"]
+        all_files = [p for p in all_files if p.is_file() and p.suffix.lower() in [".csv", ".parquet"]]
 
         # Collect file sizes
         file_sizes = [(p, p.stat().st_size) for p in all_files]
@@ -149,7 +148,7 @@ def split_csv_groups_by_size(
     return new_mapping
 
 
-def write_db_by_hac(db_id: str, pattern: str, output_folder: Path, 
+def write_db_by_hac(db_id: str, pattern: list[str], output_folder: Path, 
                     blocksize="64MB", use_cols: tuple[str] = ("ID", "SMILES")) -> None:
     """
     Normalize SMILES, deduplicate locally,
@@ -181,8 +180,14 @@ def write_db_by_hac(db_id: str, pattern: str, output_folder: Path,
     group_id = db_id
     if "002" in db_id:
         group_id = db_id.split("_")[0]
-
-    ddf = dd.read_csv(pattern, blocksize=blocksize, usecols=list(use_cols))
+    if Path(pattern[0]).suffix == ".csv":
+        ddf = dd.read_csv(pattern, blocksize=blocksize, usecols=list(use_cols))
+    elif Path(pattern[0]).suffix == ".parquet":
+        ddf = dd.read_parquet(pattern, blocksize=blocksize, columns=list(use_cols))
+    else:
+        print(f"⚠️ Skipping unsupported file type: {pattern}")
+        raise NotImplementedError("File not supported")
+        
     ddf = ddf.dropna(subset=["SMILES"])
 
     # Normalize SMILES
@@ -247,8 +252,17 @@ def check_files(pattern: list[str], db_id: str, use_cols: tuple[str] = ("ID", "S
     wrong_files = []
     right_files = []
     for f in pattern:
+        f = Path(f)
         try:
-            cols = pd.read_csv(f, nrows=0).columns
+            if f.suffix == ".csv":
+                cols = pd.read_csv(f, nrows=0).columns
+            elif f.suffix == ".parquet":
+                cols = pq.ParquetFile(f).schema.names
+            else:
+                print(f"⚠️ Skipping unsupported file type: {f}")
+                wrong_files.append(f"{f}\n")
+                continue
+
             if not all(c in cols for c in use_cols):
                 wrong_files.append(f"{f}\n") 
                 continue
@@ -269,18 +283,19 @@ def check_files(pattern: list[str], db_id: str, use_cols: tuple[str] = ("ID", "S
 # -------------------------
 # 2️⃣ Read databases lazily
 # -------------------------
-base_db = { "001": "Enamine_REAL_65B/Enamine_REAL_65B_partitioned_15M/*.csv",
-            "002": "ZINC22/smiles_csv/H*/*_clean.csv",  # H04_to_H24
-            "003": "Savi/*/*_clean.csv",
-            "004": "PubChem/*_clean.csv",
-            "005": "ChEMBL/*_clean.csv",
-            "006": "DrugBank/*_clean.csv",
-            "007": "Coconut/*_clean.csv",
-            "008": "NPAtlas/*_clean.csv",
-            "009": "ChemistriX_Clean/VIRTUAL_BIUR_POR_MW_CLEAN/*_clean.csv",
-            "010": "CHIPMUNK/*_clean.csv",
-            "011": "SCUBIDOO/*_clean.csv",
-            "012": "SureChEMBL/*_clean.csv",
+base_db = { "001": "Enamine_REAL_65B_parquet/*.parquet",
+            "002": "ZINC22/*.csv",  # H04_to_H24
+            "003": "Savi_parquet/*/*.parquet",
+            "004": "PubChem_parquet/*.parquet",
+            "005": "ChEMBL_parquet/*.parquet",
+            "006": "DrugBank/*.parquet",
+            "007": "Coconut_parquet/*.parquet",
+            "008": "NPAtlas_parquet/*.parquet",
+            "009": "ChemistriX_Clean/VIRTUAL_BIUR_POR_MW_CLEAN/*.parquet",
+            "010": "CHIPMUNK_parquet/*.parquet",
+            "011": "SCUBIDOO_parquet/*.parquet",
+            "012": "SureChEMBL_parquet/*.parquet",
+            "013": "MolPort_parquet/*.parquet"
         }
 
 def main():
