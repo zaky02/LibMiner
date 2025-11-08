@@ -67,7 +67,7 @@ def deduplicator(hac_folders: Path | str, out_path: Path | str, block_size: str 
                                 columns=[*use_cols, "db_id"])
     
     # Deduplicate across all sources using normalized SMILES
-    ddf_merged = ddf_merged.drop_duplicates(subset=["ID"])
+    ddf_merged = ddf_merged.drop_duplicates(subset=["ID"]).drop_duplicates(subset="SMILES")
 
     # Aim for ≤15M rows per partition because this is for each HAC
     ddf_merged = ddf_merged.repartition(partition_size=repartition_size)
