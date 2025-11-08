@@ -5,7 +5,6 @@ import argparse
 import numpy as np
 import dask.dataframe as dd
 from dask.distributed import Client, performance_report
-import json
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Deduplicate SMILES')

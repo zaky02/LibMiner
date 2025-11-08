@@ -178,8 +178,9 @@ def write_db_by_hac(db_id: str, pattern: list[str], output_folder: Path,
     }
     
     group_id = db_id
-    if "002" in db_id:
+    if len(db_id.split("_")) > 1:
         group_id = db_id.split("_")[0]
+        
     if Path(pattern[0]).suffix == ".csv":
         ddf = dd.read_csv(pattern, blocksize=blocksize, usecols=list(use_cols))
     elif Path(pattern[0]).suffix == ".parquet":
@@ -226,11 +227,12 @@ def rename_partitions(output_folder: Path):
         # Inside each db_id, look for HAC=* folders
         for hac_folder in db_folder.glob("HAC=*"):
             hac_value = hac_folder.name.split("=")[-1]
-            if "0" in hac_value :
+            if  not int(hac_value):
                 new_hac_folder = output_folder / f"wrong_HAC_{hac_value}"
             else:
                 new_hac_folder = output_folder / f"HAC_{hac_value}"
-                new_hac_folder.mkdir(exist_ok=True, parents=True)
+                
+            new_hac_folder.mkdir(exist_ok=True, parents=True)
 
             # Move and rename parquet files
             for i, parquet_file in enumerate(hac_folder.glob("*.parquet"), start=1):
