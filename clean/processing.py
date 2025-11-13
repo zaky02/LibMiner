@@ -34,6 +34,77 @@ client = Client(scheduler_address)    # Connect to that cluster
 # -------------------------
 RDLogger.DisableLog('rdApp.*')
 
+PEPTIDE_SMARTS = "[NX3:1][CX3:2](=[OX1:20])[CX4:3][NX3:4][CX3:5](=[OX1:21])"
+Q = Chem.MolFromSmarts(PEPTIDE_SMARTS)
+
+def _amide_cn_bond_not_ring(mol, a_idx, c_idx):
+    b = mol.GetBondBetweenAtoms(a_idx, c_idx)
+    return (b is not None) and (not b.IsInRing())
+
+def _has_nonring_carbon_on_nonamide_side(mol, carbonyl_c_idx, amide_n_idx):
+    """
+    Require an external, NON-RING carbon neighbor on the non-amide side of the carbonyl carbon.
+    (Prevents attachment directly to aromatic/ring carbon like ...C(=O)c1...)
+    """
+    c = mol.GetAtomWithIdx(carbonyl_c_idx)
+    for nb in c.GetNeighbors():
+        nb_idx = nb.GetIdx()
+        if nb_idx == amide_n_idx:
+            continue
+        b = mol.GetBondBetweenAtoms(carbonyl_c_idx, nb_idx)
+        if b is None:
+            continue
+        # skip the carbonyl oxygen
+        if nb.GetAtomicNum() == 8 and b.GetBondType() == Chem.BondType.DOUBLE:
+            continue
+        # must be carbon, not in a ring, and the bond itself not a ring bond
+        if nb.GetAtomicNum() == 6 and (not nb.IsInRing()) and (not b.IsInRing()):
+            return True
+    return False
+
+
+def is_true_peptide(mol: Chem.Mol) -> bool:
+    """
+    True if the molecule contains two consecutive peptide (amide) bonds where:
+      - the motif NX3-C(=O)-CX4-NX3-C(=O) is present,
+      - NONE of the matched atoms are in a ring,
+      - each amide C-N bond is NOT a ring bond,
+      - and each carbonyl carbon is 'internal' to a NON-RING carbon on its non-amide side
+        (so ...C(=O)c... is rejected).
+    """
+
+    for match in mol.GetSubstructMatches(Q):
+        # Build map#:target_idx dictionary from the query order
+        mapnum_to_idx = {}
+        for q_atom, tgt_idx in zip(Q.GetAtoms(), match):
+            amap = q_atom.GetAtomMapNum()
+            if amap:
+                mapnum_to_idx[amap] = tgt_idx
+
+        n1 = mapnum_to_idx[1]
+        c1 = mapnum_to_idx[2]
+        spacer_c = mapnum_to_idx[3]
+        n2 = mapnum_to_idx[4]
+        c2 = mapnum_to_idx[5]
+        # oxygens are 20,21 if you need them: o1 = mapnum_to_idx[20]; o2 = mapnum_to_idx[21]
+
+        # 1) all matched atoms (including oxygens) must be non-ring
+        if any(mol.GetAtomWithIdx(idx).IsInRing() for idx in match):
+            continue
+
+        # 2) both amide C–N bonds must not be ring bonds
+        if not (_amide_cn_bond_not_ring(mol, n1, c1) and _amide_cn_bond_not_ring(mol, n2, c2)):
+            continue
+
+        # 3) require a NON-RING carbon neighbor on the non-amide side of each carbonyl carbon
+        if not (_has_nonring_carbon_on_nonamide_side(mol, c1, n1) and
+                _has_nonring_carbon_on_nonamide_side(mol, c2, n2)):
+            continue
+
+        return True
+
+    return False
+
 def normalize_smiles(smi: str) -> str | None:
     """Normalize SMILES by:
     - Converting to canonical isomeric SMILES
@@ -57,6 +128,10 @@ def normalize_smiles(smi: str) -> str | None:
         mol = Chem.MolFromSmiles(smi, sanitize=True)
         if mol is None:
             return None
+        
+        if is_true_peptide(mol): # skip true peptides
+            return None
+        
         mol = rdMolStandardize.Normalize(mol)  
         # Apply salt removal only if multiple fragments
         if "." in smi:
