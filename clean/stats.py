@@ -102,24 +102,14 @@ def batched(iterable, n):
         yield batch
 
 
-def compute_database_redundancy(classified_folders: dict[str, str], dedup_dfs, 
-                                n:int=2, smiles_col: str ="SMILES", 
-                               output: str | Path ="redundant_smiles.parquet"):
-    """_summary_
-
-    Args:
-        classified_folders (dict[str, str]): _description_
-        dedup_dfs (_type_): _description_
-        n (int, optional): _description_. Defaults to 2.
-        smiles_col (str, optional): _description_. Defaults to "SMILES".
-        output (str | Path, optional): _description_. Defaults to "redundant_smiles.parquet".
-
-    Returns:
-        _type_: _description_
-    """
+def get_overlapping_databases(
+    classified_folders: dict[str, str], 
+    dedup_dfs: dict[str, dd.DataFrame], 
+    n:int=2, smiles_col: str ="SMILES"
+    ):
+    
     overlaps={}
-    counts = {}
-    smiles_to_dbs = defaultdict(set)
+
     pairs = list(combinations(classified_folders, 2))
     for batch in batched(pairs, n):  # run n bacthes at a time
         futures = []
@@ -131,6 +121,15 @@ def compute_database_redundancy(classified_folders: dict[str, str], dedup_dfs,
         for (db1, db2), res in zip(batch, results):
             overlaps[f"{db1}_{db2}"] = res
     
+    return overlaps
+
+
+def save_redundancy(
+    overlaps: dict[str, pd.DataFrame],
+    output: str | Path ="redundant_smiles.parquet"): 
+    
+    counts = {}
+    smiles_to_dbs = defaultdict(set)   
     for pair, df in overlaps.items():
         counts[pair] = df.shape[0]
         db1, db2 = pair.split("_")
@@ -168,13 +167,16 @@ def main():
             
             (output_stats/hac).mkdir(parents=True, exist_ok=True)
             out_parq = output_stats / hac / out_parquet 
-               
+            print("counting stats")
             sta = compute_count(hac_folders, block_size)
             
             classified_folders = convert_folder(hac_folders)
+            print("computing internal stats")
             internal_counts, dedup_dfs = compute_internal_duplication(classified_folders, smiles_col, block_size, batch_size)
-            redundante_smiles, redundant_counts = compute_database_redundancy(classified_folders, dedup_dfs,
-                                                                              batch_size, smiles_col, out_parq)
+            
+            print("computing database redundancy")
+            overlaps = get_overlapping_databases(classified_folders, dedup_dfs, batch_size, smiles_col)
+            redundante_smiles, redundant_counts = save_redundancy(overlaps, out_parq)
             
             pd.concat([sta, internal_counts], axis=1).to_csv(output_stats/hac/"after_before_counts.csv")
             redundant_counts.to_csv(output_stats/hac/"overlaping_counts.csv")
