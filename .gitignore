@@ -2,4 +2,7 @@ logs/*
 runs/*
 subset_clustering/logs/*
 subset_clustering/utils/__pycache__/*
-
+clean/*.smi
+clean/*.h5
+clean/*.csv
+clean/test_files
