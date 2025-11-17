@@ -59,7 +59,7 @@ def deduplicator(hac_folders: Path | str, out_path: Path | str, block_size: str 
     out_path = Path(out_path)
     hac_folders = Path(hac_folders)
     hac = hac_folders.name.split("_")[-1]
-    meta = {"ID": "string", "SMILES": "string", "db_id": "string", "num_id": "int64"}
+    meta = {"ID": "string", "SMILES": "string", "db_id": "string", "num_ID": "int64"}
     
     # read parquet files from a HAC  
     ddf_merged = dd.read_parquet(f"{hac_folders}/*.parquet", blocksize=block_size, 
@@ -68,9 +68,6 @@ def deduplicator(hac_folders: Path | str, out_path: Path | str, block_size: str 
     # Deduplicate across all sources using normalized SMILES
     ddf_merged = ddf_merged.drop_duplicates(subset=["ID"]).drop_duplicates(subset="SMILES")
 
-    # Aim for ≤15M rows per partition because this is for each HAC
-    ddf_merged = ddf_merged.repartition(partition_size=repartition_size)
-
     # Compute number of rows per partition (fast metadata op)
     partition_lengths = ddf_merged.map_partitions(len).compute()
     partition_offsets = np.insert(np.cumsum(partition_lengths[:-1]), 0, 0)
@@ -78,6 +75,8 @@ def deduplicator(hac_folders: Path | str, out_path: Path | str, block_size: str 
     ddf_merged = assign_ids(ddf_merged, partition_offsets, current_offset, meta)
     count = int(sum(partition_lengths))
     
+    # Aim for ≤15M rows per partition because this is for each HAC
+    ddf_merged = ddf_merged.repartition(partition_size=repartition_size)
     # -------------------------
     # 4️⃣ Write the database
     # -------------------------
@@ -114,7 +113,7 @@ def main():
             lines = {int(x.split("#")[0].strip("HAC")): 
                      int(x.strip().split("#")[-1]) for x in st.readlines()}
             
-        hacs = sorted(out_path.glob("HAC*"), key=lambda x: int(x.name.split("_")[-1]))
+        hacs = sorted(out_path.glob("HAC_*"), key=lambda x: int(x.name.split("_")[-1]))
         for hac_folders in hacs:
             hac = hac_folders.name.split("_")[-1]
             if f"HAC {hac}" in progress.read_text():
