@@ -5,6 +5,7 @@ import argparse
 import numpy as np
 import dask.dataframe as dd
 from dask.distributed import Client, performance_report
+import pandas as pd
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Deduplicate SMILES')
@@ -136,7 +137,11 @@ def main():
         end = time.perf_counter()
         print(f"Initial cleaning completed in {end - start:.2f} seconds")    
    
-
+        with open(stats, "r") as st:
+            lines = pd.Series({int(x.split("#")[0].strip("HAC")): 
+                     int(x.strip().split("#")[-1]) for x in st.readlines()})
+            lines.to_csv(out_path/"final_dedup_counts.csv")
+            
 if __name__ == "__main__":
     # Run this if this file is executed from command line but not if is imported as API
     main()

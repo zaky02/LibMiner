@@ -27,7 +27,7 @@ def parse_args():
 
 
 @ray.remote
-def convert_parquet_to_smi_chunk(parquet_path, out_dir, smiles_col="SMILES", id_col="ID", 
+def convert_parquet_to_smi_chunk(parquet_path, out_dir, smiles_col="SMILES", id_col="num_ID", 
                                  batch_size=100_000):
     """
     Convert a single Parquet file to a temporary .smi chunk file.
