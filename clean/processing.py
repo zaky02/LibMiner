@@ -92,7 +92,7 @@ def is_true_peptide(mol: Chem.Mol) -> bool:
         if any(mol.GetAtomWithIdx(idx).IsInRing() for idx in match):
             continue
 
-        # 2) both amide C–N bonds must not be ring bonds
+        # 2) both amide C-N bonds must not be ring bonds
         if not (_amide_cn_bond_not_ring(mol, n1, c1) and _amide_cn_bond_not_ring(mol, n2, c2)):
             continue
 
