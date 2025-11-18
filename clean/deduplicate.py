@@ -75,14 +75,14 @@ def deduplicator(hac_folders: Path | str, out_path: Path | str, block_size: str 
     count = int(sum(partition_lengths))
     if count == 0:
         return count
-     
+    
     partition_offsets = np.insert(np.cumsum(partition_lengths[:-1]), 0, 0)
     # Assign unique IDs within Dask graph (no Python loop)
+    ddf_merged = assign_ids(ddf_merged, partition_offsets, current_offset, meta)
+    
     n = max(1, int(count / 10_000_000))
     # Aim for ≤15M rows per partition because this is for each HAC
     ddf_merged = ddf_merged.repartition(npartitions=n)
-    
-    ddf_merged = assign_ids(ddf_merged, partition_offsets, current_offset, meta)
     # -------------------------
     # 4️⃣ Write the database
     # -------------------------
