@@ -12,7 +12,7 @@ def parse_args():
     parser.add_argument('-bs', '--blocksize', type=str, help='Block size for dask dataframe. The safest is the default 64 MB',  required=False, default='64MB')
     parser.add_argument('-o','--output_path', type=str, help='Output foldr for the database', required=False,
                         default='Molecular_database')
-    parser.add_argument('-s', '--repartition_size', type=str, help='The size for each of the files default is 500MB', required=False, default="500MB")
+    parser.add_argument('-s', '--repartition_size', type=int, help='The number of rows for each partition and file', required=False, default=10_000_000)
     parser.add_argument("-c", "--use_cols", nargs="+", help="Columns to read", required=False, 
                         default=['ID', "SMILES"])
     args = parser.parse_args()
@@ -52,7 +52,7 @@ def make_name_function(hac: int):
 
 
 def deduplicator(hac_folders: Path | str, out_path: Path | str, block_size: str = "64MB", 
-                 repartition_size: str = "500MB",
+                 repartition_size: str = 10_000_000,
                  use_cols: tuple[str] = ("ID", "SMILES"), current_offset: int = 0):
     """
     deduplicate, assign unique numerical IDs and write to HAC-specific Parquet folders.
@@ -80,7 +80,7 @@ def deduplicator(hac_folders: Path | str, out_path: Path | str, block_size: str 
     # Assign unique IDs within Dask graph (no Python loop)
     ddf_merged = assign_ids(ddf_merged, partition_offsets, current_offset, meta)
     
-    n = max(1, int(count / 10_000_000))
+    n = max(1, int(count / repartition_size))
     # Aim for ≤15M rows per partition because this is for each HAC
     ddf_merged = ddf_merged.repartition(npartitions=n)
     # -------------------------
