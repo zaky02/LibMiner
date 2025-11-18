@@ -34,7 +34,7 @@ client = Client(scheduler_address)    # Connect to that cluster
 # -------------------------
 RDLogger.DisableLog('rdApp.*')
 
-PEPTIDE_SMARTS = "[NX3:1][CX3:2](=[OX1:20])[CX4:3][NX3:4][CX3:5](=[OX1:21])"
+PEPTIDE_SMARTS = "[NX3:1][CX3:2](=[OX1:20])[CX4:3][NX3:4][CX3:5](=[OX1:21])" # dipeptide motif
 Q = Chem.MolFromSmarts(PEPTIDE_SMARTS)
 
 def _amide_cn_bond_not_ring(mol, a_idx, c_idx):
@@ -133,15 +133,17 @@ def normalize_smiles(smi: str) -> str | None:
             return None
         
         mol = rdMolStandardize.Normalize(mol)  
-        # Apply salt removal only if multiple fragments
-        if "." in smi:
-            lfs = rdMolStandardize.LargestFragmentChooser()
-            mol = lfs.choose(mol)
+        
         # Apply uncharging only if charges are present
         if "+" in smi or "-" in smi:
             uncharger = rdMolStandardize.Uncharger()
             mol = uncharger.uncharge(mol)
-        
+            
+        # Apply salt removal only if multiple fragments
+        if "." in smi:
+            lfs = rdMolStandardize.LargestFragmentChooser()
+            mol = lfs.choose(mol)
+
         Chem.SanitizeMol(mol)      # ensure valid again after modifications, it is in place
 
         return Chem.MolToSmiles(mol, canonical=True, isomericSmiles=True)
