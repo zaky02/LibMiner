@@ -43,7 +43,7 @@ def find_hac_by_index(index_file: str, search_results: dict[str, np.array]):
     with open(index_file, "r") as st:
         lines = {int(x.strip().split("#")[-1]): int(x.split("#")[0].strip("HAC")) for x in st.readlines()}
     index_dict = {}
-    bounds = np.array(lines.keys())
+    bounds = np.array(sorted(lines.keys()))
     for query, result in search_results.items():
         index = sorted([x[0] for x in result])
         i = np.unique(np.searchsorted(bounds, index, side="right"))

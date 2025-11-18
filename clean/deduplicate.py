@@ -25,6 +25,7 @@ def parse_args():
 scheduler_address = os.environ["DASK_SCHEDULER_ADDRESS"]
 
 client = Client(scheduler_address)    # Connect to that cluster
+client.wait_for_workers(n_workers=1, timeout=180)
 
 # -------------------------
 # 1️⃣ Setup RDKit tools
@@ -60,29 +61,33 @@ def deduplicator(hac_folders: Path | str, out_path: Path | str, block_size: str 
     out_path = Path(out_path)
     hac_folders = Path(hac_folders)
     hac = hac_folders.name.split("_")[-1]
-    meta = {"ID": "string", "SMILES": "string", "db_id": "string", "num_ID": "int64"}
+    meta = {use_cols[0]: "string", use_cols[1]: "string", "db_id": "string", "num_ID": "int64"}
     
     # read parquet files from a HAC  
     ddf_merged = dd.read_parquet(f"{hac_folders}/*.parquet", blocksize=block_size, 
                                 columns=[*use_cols, "db_id"])
     
     # Deduplicate across all sources using normalized SMILES
-    ddf_merged = ddf_merged.drop_duplicates(subset=["ID"]).drop_duplicates(subset="SMILES")
+    ddf_merged = ddf_merged.drop_duplicates(subset=[use_cols[0]]).drop_duplicates(subset=use_cols[1])
 
     # Compute number of rows per partition (fast metadata op)
     partition_lengths = ddf_merged.map_partitions(len).compute()
+    count = int(sum(partition_lengths))
+    if count == 0:
+        return count
+     
     partition_offsets = np.insert(np.cumsum(partition_lengths[:-1]), 0, 0)
     # Assign unique IDs within Dask graph (no Python loop)
-    ddf_merged = assign_ids(ddf_merged, partition_offsets, current_offset, meta)
-    count = int(sum(partition_lengths))
-    
+    n = max(1, int(count / 10_000_000))
     # Aim for ≤15M rows per partition because this is for each HAC
-    ddf_merged = ddf_merged.repartition(partition_size=repartition_size)
+    ddf_merged = ddf_merged.repartition(npartitions=n)
+    
+    ddf_merged = assign_ids(ddf_merged, partition_offsets, current_offset, meta)
     # -------------------------
     # 4️⃣ Write the database
     # -------------------------
     ddf_merged.to_parquet(
-        out_path / f"cleaned/{hac}",
+        out_path / f"cleaned/HAC_{hac}",
         write_index=False,
         compute=True,
         engine="pyarrow",

@@ -97,7 +97,7 @@ def main():
     ray.init(ignore_reinit_error=True, log_to_driver=False)
     # Batch size can match #workers if desired, but each DB is processed fully partitioned
     input_path = Path(input_folder) / "cleaned"
-    parquet_files = input_path.glob("HAC*/*.parquet")
+    parquet_files = input_path.glob("HAC_*/*.parquet")
     ray_parquet_to_smi(parquet_files, output_smi, batch_size=batch_size)
     
     Path(output_hdf).parent.mkdir(parents=True, exist_ok=True)

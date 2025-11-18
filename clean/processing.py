@@ -28,6 +28,7 @@ def parse_args():
 scheduler_address = os.environ["DASK_SCHEDULER_ADDRESS"]
 
 client = Client(scheduler_address)    # Connect to that cluster
+client.wait_for_workers(n_workers=1, timeout=180)
 
 # -------------------------
 # 1️⃣ Setup RDKit tools

@@ -31,6 +31,7 @@ def parse_args():
 
 scheduler_address = os.environ["DASK_SCHEDULER_ADDRESS"]
 client = Client(scheduler_address)    # Connect to that cluster
+client.wait_for_workers(n_workers=1, timeout=180)
 
 
 def compute_count(hac_folders, block_size="64MB"):
@@ -127,7 +128,7 @@ def get_overlap(db1: str, db2: str,
 
     # CASE 1 - small fits fully in memory  best performance, no shuffle
     if min(len1, len2) <= small_threshold:
-        small_list = small[smiles_col].tolist()
+        small_list = small[smiles_col].to_list()
         return big[big[smiles_col].isin(small_list)]
 
     # CASE 2 - both large chunked approach without shuffle
@@ -257,17 +258,17 @@ def main():
             
             (output_stats/hac).mkdir(parents=True, exist_ok=True)
             out_parq = output_stats / hac / out_parquet 
-            print("counting stats")
+            print(f"counting stats {hac}")
             sta = compute_count(hac_folders, block_size)
             
             classified_folders = convert_folder(hac_folders)
-            print("computing internal stats")
+            print(f"computing internal stats {hac}")
             internal_counts, dedup_dfs = compute_internal_duplication(classified_folders, 
                                                                       smiles_col, 
                                                                       block_size, 
                                                                       batch_size)
             
-            print("computing database redundancy")
+            print(f"computing database redundancy {hac}")
             overlaps = get_overlapping_databases(dedup_dfs, internal_counts, hac,
                                                  batch_size, smiles_col, small_threshold)
             redundante_smiles, redundant_counts = save_redundancy(overlaps,
