@@ -82,7 +82,7 @@ def deduplicator(hac_folders: Path | str, out_path: Path | str, block_size: str 
     
     n = max(1, int(count / repartition_size))
     # Aim for ≤15M rows per partition because this is for each HAC
-    ddf_merged = ddf_merged.repartition(npartitions=n)
+    ddf_merged = ddf_merged.repartition(npartitions=n) # use num partitions instead of MB because it will cause memory problems apparently
     # -------------------------
     # 4️⃣ Write the database
     # -------------------------
@@ -94,6 +94,7 @@ def deduplicator(hac_folders: Path | str, out_path: Path | str, block_size: str 
         name_function=make_name_function(hac=int(hac))     
     )
     
+    del ddf_merged
     return count
 
 # -------------------------

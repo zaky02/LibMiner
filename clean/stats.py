@@ -22,7 +22,7 @@ def parse_args():
     parser.add_argument('-op','--output_parquet', type=str, help="The name for the redundant_smiles file",   required=False, default='redudant_smiles.parquet')
     parser.add_argument('-sm','--small_threshold', type=int, 
                         help='The threshold to consider a dataframe small', required=False,
-                        default=1_000_000)
+                        default=1_500_000)
     
     args = parser.parse_args()
     return args.blocksize, args.database_path, args.smiles_col, args.output_parquet, args.small_threshold
@@ -65,7 +65,7 @@ def compute_internal_duplication(
     smiles_col: str = "SMILES",
     block_size: str = "64MB",
     batch_size: int = 2,
-    small_threshold: int=1_000_000
+    small_threshold: int=1_500_000
 ):
     """
     Compute internal deduplication statistics for many databases in smaller batches.
@@ -112,7 +112,7 @@ def get_overlap(db1: str, db2: str,
                 counts: dict[str, int], 
                 hac: str,
                 smiles_col: str ="SMILES", 
-                small_threshold: int=1_000_000):
+                small_threshold: int=1_500_000):
 
     df1 = dedup_dfs[db1]
     df2 = dedup_dfs[db2]
@@ -135,15 +135,18 @@ def get_overlap(db1: str, db2: str,
     parts = max(int(min(len1, len2) / small_threshold), 1)
     small = small.repartition(npartitions=parts)
 
-    #overlaps = []
     for i, sma_part in enumerate(small.to_delayed()):
         # convert each small partition to pandas list (critical!)
+        out_path = f"tmp/{hac}/{db1}_{db2}/part_{i}"
+        print(f"writting to {out_path}")
+        if Path(out_path).exists():
+            continue
         sma_list = sma_part[smiles_col].compute().tolist()
         # Safe: partition-local isin, NO shuffle
         part_overlap = big[big[smiles_col].isin(sma_list)]
-        out_path = f"tmp/{hac}/{db1}_{db2}/part_{i}"
         part_overlap.to_parquet(out_path, write_index=False)
-        #overlaps.append(part_overlap)
+        del sma_list
+        del part_overlap
 
     return dd.read_parquet(f"tmp/{hac}/{db1}_{db2}/part_*/*.parquet")
 
@@ -153,7 +156,7 @@ def get_overlapping_databases(
     counts: dict[str, int], 
     hac: str,
     n:int=2, smiles_col: str ="SMILES",
-    small_threshold=1_000_000
+    small_threshold=1_500_000
     ):
     
     output_dir = Path("tmp") / hac
@@ -178,7 +181,7 @@ def count_reundancy(
     overlaps: dict[str, dd.DataFrame | pd.DataFrame],
     counts: dict[str, int],
     smiles_col: str = "SMILES",
-    small_threshold=1_000_000
+    small_threshold=1_500_000
     ):
     
     overlap_counts = {}
@@ -218,7 +221,7 @@ def save_redundancy(
     counts: dict[str, int],
     smiles_col: str ="SMILES",
     output: str | Path ="redundant_smiles.parquet",
-    small_threshold=1_000_000): 
+    small_threshold=1_500_000): 
     
     smiles_to_dbs, counts = count_reundancy(overlaps, counts, smiles_col, small_threshold)
     
@@ -283,6 +286,8 @@ def main():
 
             with open(progress, "a") as f:
                 f.write(f"HAC {hac} done\n")
+            
+            del overlaps
             
             if Path(f"tmp/{hac}").exists():
                 shutil.rmtree(f"tmp/{hac}", ignore_errors=True)
