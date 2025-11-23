@@ -6,6 +6,7 @@ import numpy as np
 import dask.dataframe as dd
 from dask.distributed import Client, performance_report
 import pandas as pd
+import gc
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Deduplicate SMILES')
@@ -95,6 +96,8 @@ def deduplicator(hac_folders: Path | str, out_path: Path | str, block_size: str 
     )
     
     del ddf_merged
+    client.run(gc.collect)
+    
     return count
 
 # -------------------------

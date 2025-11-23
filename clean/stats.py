@@ -10,6 +10,9 @@ from itertools import combinations
 import dask
 import pandas as pd
 import shutil
+import gc
+import logging
+
 
 
 def parse_args():
@@ -20,18 +23,17 @@ def parse_args():
     parser.add_argument('-s','--smiles_col', type=str, help='The column name of the smiles', required=False,
                         default='SMILES')
     parser.add_argument('-op','--output_parquet', type=str, help="The name for the redundant_smiles file",   required=False, default='redudant_smiles.parquet')
-    parser.add_argument('-sm','--small_threshold', type=int, 
-                        help='The threshold to consider a dataframe small', required=False,
-                        default=1_500_000)
     
     args = parser.parse_args()
-    return args.blocksize, args.database_path, args.smiles_col, args.output_parquet, args.small_threshold
+    return args.blocksize, args.database_path, args.smiles_col, args.output_parquet
 
 
 
 scheduler_address = os.environ["DASK_SCHEDULER_ADDRESS"]
 client = Client(scheduler_address)    # Connect to that cluster
 client.wait_for_workers(n_workers=1, timeout=180)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 def compute_count(hac_folders, block_size="64MB"):
@@ -44,10 +46,12 @@ def compute_count(hac_folders, block_size="64MB"):
         return df.groupby("db_id")["SMILES"].count()
     
     # this is a partition groupby
-    counts_per_partition = ddf_merged.map_partitions(partition_counts).compute()
-    
-    # Combine counts across partitions
-    return counts_per_partition.groupby("db_id").sum().to_frame().rename({"SMILES":"total_counts"}, axis=1)
+    counts_per_partition = ddf_merged.map_partitions(partition_counts)
+    final_count = counts_per_partition.groupby("db_id").sum().to_frame().rename(columns={"SMILES":"total_counts"}).compute()
+
+    del ddf_merged
+    client.run(gc.collect)
+    return final_count
 
 
 def convert_folder(hac_folders: Path | str):
@@ -65,7 +69,6 @@ def compute_internal_duplication(
     smiles_col: str = "SMILES",
     block_size: str = "64MB",
     batch_size: int = 2,
-    small_threshold: int=1_500_000
 ):
     """
     Compute internal deduplication statistics for many databases in smaller batches.
@@ -92,150 +95,89 @@ def compute_internal_duplication(
         # Compute this batch in one go
         computed_values = dask.compute(*lazy_results)
         counts.update(dict(zip([db_id for db_id, _ in batch], computed_values)))
-        
-    # leave the small databases computed    
-    for db_id, unique_count in counts.items():
-        if unique_count <= small_threshold:
-            dedup_dfs[db_id] = dedup_dfs[db_id].compute()
 
     return pd.Series(counts, name="internal_counts"), dedup_dfs
 
 
-def batched(iterable, n):
-    it = iter(iterable)
-    while batch := list(islice(it, n)):
-        yield batch
-
-
-def get_overlap(db1: str, db2: str, 
-                dedup_dfs: dict[str, dd.DataFrame], 
-                counts: dict[str, int], 
-                hac: str,
-                smiles_col: str ="SMILES", 
-                small_threshold: int=1_500_000):
+def get_overlap_by_merge(db1: str, db2: str, 
+                        dedup_dfs: dict[str, dd.DataFrame], 
+                        smiles_col: str ="SMILES", 
+                        on_disk: bool=False):
 
     df1 = dedup_dfs[db1]
     df2 = dedup_dfs[db2]
 
-    len1 = counts[db1]
-    len2 = counts[db2]
-
-    # choose smaller df
-    if len1 <= len2:
-        small, big = df1, df2
-    else:
-        small, big = df2, df1
-
-    # CASE 1 - small fits fully in memory  best performance, no shuffle
-    if min(len1, len2) <= small_threshold:
-        small_list = small[smiles_col].to_list()
-        return big[big[smiles_col].isin(small_list)]
-
-    # CASE 2 - both large chunked approach without shuffle
-    parts = max(int(min(len1, len2) / small_threshold), 1)
-    small = small.repartition(npartitions=parts)
-
-    for i, sma_part in enumerate(small.to_delayed()):
-        # convert each small partition to pandas list (critical!)
-        out_path = f"tmp/{hac}/{db1}_{db2}/part_{i}"
-        print(f"writting to {out_path}")
-        if Path(out_path).exists():
-            continue
-        sma_list = sma_part[smiles_col].compute().tolist()
-        # Safe: partition-local isin, NO shuffle
-        part_overlap = big[big[smiles_col].isin(sma_list)]
-        part_overlap.to_parquet(out_path, write_index=False)
-        del sma_list
-        del part_overlap
-
-    return dd.read_parquet(f"tmp/{hac}/{db1}_{db2}/part_*/*.parquet")
+    # Use the merge and let Dask manage the partitioning/shuffle
+    # If len(df1) and len(df2) are both large, this is the most Dask-idiomatic way.
+    # The 'on_disk' flag already handles the memory spill.
+    
+    # We will NOT repartition manually here, let Dask decide how many partitions
+    # it needs for the output based on the input partition sizes.
+    out_dir =  Path(f"tmp/{db1}_{db2}")
+    shuffle_method = "disk" if on_disk else "tasks"
+    if not out_dir.exists():
+        overlap = dd.merge(df1, df2, on=smiles_col, how="inner", shuffle_method=shuffle_method)
+    if on_disk:
+        if not out_dir.exists():
+            overlap.to_parquet(out_dir, write_index=False, compute=True)
+        return out_dir
+    return overlap # Returns a Dask DataFrame, not computed!
 
 
 def get_overlapping_databases(
     dedup_dfs: dict[str, dd.DataFrame],
-    counts: dict[str, int], 
-    hac: str,
-    n:int=2, smiles_col: str ="SMILES",
-    small_threshold=1_500_000
+    smiles_col: str ="SMILES",
+    on_disk: bool=False
     ):
     
-    output_dir = Path("tmp") / hac
-    output_dir.mkdir(exist_ok=True, parents=True)
     overlaps={}
     pairs = list(combinations(dedup_dfs.keys(), 2))
-    for batch in batched(pairs, n):  # run n bacthes at a time
-        futures = []
-        for db1, db2 in batch:
-            overlap = get_overlap(db1, db2, dedup_dfs, counts, hac, smiles_col, 
-                                  small_threshold)
-            futures.append(overlap)
-            
-        #results = dask.compute(*futures)
-        for (db1, db2), res in zip(batch, futures):
-            overlaps[f"{db1}_{db2}"] = res
-
+    for db1, db2 in pairs:  # run n bacthes at a time
+        overlap = get_overlap_by_merge(db1, db2, dedup_dfs, smiles_col, on_disk)
+        overlaps[f"{db1}_{db2}"] = overlap
+    
     return overlaps
 
 
 def count_reundancy(
-    overlaps: dict[str, dd.DataFrame | pd.DataFrame],
-    counts: dict[str, int],
-    smiles_col: str = "SMILES",
-    small_threshold=1_500_000
+    overlaps: dict[str, dd.DataFrame | pd.DataFrame | Path],
+    smiles_col: str = "SMILES"
     ):
     
     overlap_counts = {}
     smiles_to_dbs = defaultdict(set)  
     for pair, df in overlaps.items():
         db1, db2 = pair.split("_")
-        if all(i <= small_threshold for i in [counts[u] for u in [db1, db2]]):
-            overlap_counts[pair] = df.shape[0]
-            sm = df[smiles_col]
-        else:
-            overlap_counts[pair] = df.map_partitions(len).sum().compute()
-            sm = df[smiles_col].compute()
-            
+        if isinstance(df, Path):
+            df = dd.read_parquet(df, columns=[smiles_col])                 
+        sm = df[smiles_col].compute()
+        overlap_counts[pair] = len(sm)
         for smi in sm:
             smiles_to_dbs[smi].update([db1, db2])
-        del sm
+        del sm, df
+        client.run(gc.collect)
+  
     return smiles_to_dbs, overlap_counts
 
-def count_redundancy_ondisk( 
-    smiles_col: str,
-    output_dir = Path("tmp")):
-    
-    counts = {}
-    smiles_to_dbs = defaultdict(set)  
-    for f in output_dir.glob("*.parquet"):
-        db1, db2 = f.stem.split("_")
-        df = pd.read_parquet(f, columns=[smiles_col])
-        counts[f.stem] = len(df)
-        for smi in df[smiles_col]:
-            smiles_to_dbs[smi].update([db1, db2])
-        del df  # free memory
-    shutil.rmtree(output_dir)
-    return smiles_to_dbs, counts
 
 def save_redundancy(
-    overlaps: dict[str, dd.DataFrame | pd.DataFrame],
-    counts: dict[str, int],
+    overlaps: dict[str, dd.DataFrame | pd.DataFrame | Path],
     smiles_col: str ="SMILES",
-    output: str | Path ="redundant_smiles.parquet",
-    small_threshold=1_500_000): 
-    
-    smiles_to_dbs, counts = count_reundancy(overlaps, counts, smiles_col, small_threshold)
-    
+    output: str | Path ="redundant_smiles.parquet"): 
+
+    smiles_to_dbs, counts = count_reundancy(overlaps, smiles_col)
     smiles_overlap_df = pd.DataFrame({
                 "SMILES": list(smiles_to_dbs.keys()),
                 "Databases": [",".join(sorted(list(v))) for v in smiles_to_dbs.values()]
                     })
     
-    smiles_overlap_df.to_parquet(output)        
-    return smiles_overlap_df, pd.Series(counts, name="redundant_count")
+    smiles_overlap_df.to_parquet(output)
+            
+    return pd.Series(counts, name="redundant_count")
 
 
 def main():
-    block_size, database_path, smiles_col, out_parquet, small_threshold = parse_args()
+    block_size, database_path, smiles_col, out_parquet = parse_args()
     
     with performance_report(filename="dask-stats.html"):
         # Batch size can match #workers if desired, but each DB is processed fully partitioned
@@ -245,7 +187,7 @@ def main():
         progress.touch(exist_ok=True)
         hacs = sorted(database_path.glob("HAC_*"), key=lambda x: int(x.name.split("_")[-1]))
         
-        print(f"start count from: {database_path}")
+        logger.info(f"start count from: {database_path}")
         size_limit = 50 * (1024 ** 3)   
         for hac_folders in hacs:
             hac = hac_folders.name.split("_")[-1]
@@ -256,30 +198,32 @@ def main():
             ## look at the file size to decide if on disk or not
             file_sizes = sum([p.stat().st_size for p in hac_folders.glob("*.parquet")])
             batch_size = 3
-            if file_sizes > size_limit:
+            on_disk = False
+            if file_sizes >= size_limit:
                 batch_size = 1
-            
+                on_disk=True
+                
             (output_stats/hac).mkdir(parents=True, exist_ok=True)
             out_parq = output_stats / hac / out_parquet 
-            print(f"counting stats {hac}")
+            logger.info(f"counting stats {hac}")
             sta = compute_count(hac_folders, block_size)
             
             classified_folders = convert_folder(hac_folders)
-            print(f"computing internal stats {hac}")
+            logger.info(f"computing internal stats {hac}")
             internal_counts, dedup_dfs = compute_internal_duplication(classified_folders, 
                                                                       smiles_col, 
                                                                       block_size, 
                                                                       batch_size)
             
-            print(f"computing database redundancy {hac}")
-            overlaps = get_overlapping_databases(dedup_dfs, internal_counts, hac,
-                                                 batch_size, smiles_col, small_threshold)
-            redundante_smiles, redundant_counts = save_redundancy(overlaps,
-                                                                  internal_counts, 
-                                                                  smiles_col, 
-                                                                  out_parq, 
-                                                                  small_threshold)
-
+            logger.info(f"computing database redundancy {hac}")
+            overlaps = get_overlapping_databases(dedup_dfs, smiles_col, on_disk)
+            dedup_dfs.clear()
+            
+            
+            logger.info(f"Save database redundancy {hac}")
+            redundant_counts = save_redundancy(overlaps, smiles_col, out_parq)
+            
+            overlaps.clear()
             # save to disk the results
             pd.concat([sta, internal_counts], axis=1).to_csv(output_stats/hac/"after_before_counts.csv")
             redundant_counts.to_csv(output_stats/hac/"overlaping_counts.csv")
@@ -287,10 +231,8 @@ def main():
             with open(progress, "a") as f:
                 f.write(f"HAC {hac} done\n")
             
-            del overlaps
-            
-            if Path(f"tmp/{hac}").exists():
-                shutil.rmtree(f"tmp/{hac}", ignore_errors=True)
+            if Path(f"tmp").exists():
+                shutil.rmtree(f"tmp", ignore_errors=True)
 
         
 if __name__ == "__main__":

@@ -65,7 +65,6 @@ def retrieve_smiles(
     parquet_path: list[str],
     ):
     
-    return_cols = ",".join(return_cols)
     res = duck_con.execute(f"SELECT SMILES, db_id, num_ID FROM read_parquet($path) WHERE num_ID IN $indices)", {"path": parquet_path, "indices": indices}).df()
     return res
 
@@ -75,6 +74,17 @@ def batch_retrieve(
     ):
     
     #extract the index from the FPSIM2 results and generate the combined path and indices
+    """
+    Batch retrieve SMILES and db_id from the database using the results of FPSIM2 search and the parquet file paths.
+
+    Args:
+        search_result (dict[str, int]): The result of FPSIM2 search, where the key is the query molecule and the value is the index of the retrieved molecules.
+        parquet_paths (dict[str, str]): A dictionary containing the parquet file paths, where the key is the query molecule and the value is the path to the parquet files.
+
+    Returns:
+        dict[str, pd.DataFrame]: A dictionary containing the retrieved SMILES and db_id, where the key is the query molecule and the value is a pandas DataFrame containing the retrieved results.
+    """
+
     index_dict = {query: sorted([u[0] for u in ind]) for query, ind in search_result.items()}
     parquet = set()
     index = set()
