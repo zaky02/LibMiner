@@ -1,0 +1,14 @@
+{"001": "Enamine_REAL_65B_parquet/*.parquet",
+"002": "ZINC22/*.csv", 
+"003": "Savi_parquet/*/*.parquet",
+"004": "PubChem_parquet/*.parquet",
+"005": "ChEMBL_parquet/*.parquet",
+"006": "DrugBank/*.parquet",
+"007": "Coconut_parquet/*.parquet",
+"008": "NPAtlas_parquet/*.parquet",
+"009": "ChemistriX_Clean/VIRTUAL_BIUR_POR_MW_CLEAN/*.parquet",
+"010": "CHIPMUNK_parquet/*.parquet",
+"011": "SCUBIDOO_parquet/*.parquet",
+"012": "SureChEMBL_parquet/*.parquet",
+"013": "MolPort_parquet/*.parquet"
+}

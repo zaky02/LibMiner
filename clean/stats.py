@@ -5,12 +5,10 @@ from pathlib import Path
 import argparse
 from collections import defaultdict
 import dask
-from itertools import islice
 from itertools import combinations
 import dask
 import pandas as pd
 import shutil
-import gc
 import logging
 
 
@@ -23,9 +21,10 @@ def parse_args():
     parser.add_argument('-s','--smiles_col', type=str, help='The column name of the smiles', required=False,
                         default='SMILES')
     parser.add_argument('-op','--output_parquet', type=str, help="The name for the redundant_smiles file",   required=False, default='redudant_smiles.parquet')
+    parser.add_argument('-id','--id_col', type=str, help='The column name for the original IDs from the databases', required=False, default='ID')
     
     args = parser.parse_args()
-    return args.blocksize, args.database_path, args.smiles_col, args.output_parquet
+    return args.blocksize, args.database_path, args.smiles_col, args.output_parquet, args.id_col
 
 
 
@@ -36,21 +35,20 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def compute_count(hac_folders, block_size="64MB"):
+def compute_count(hac_folders, smiles_col="SMILES", block_size="64MB"):
     # Read only necessary columns
     ddf_merged = dd.read_parquet(f"{hac_folders}/*.parquet", blocksize=block_size,
-                                 columns=["db_id", "SMILES"])
+                                 columns=["db_id", smiles_col])
     
     # Compute counts per db_id per partition
     def partition_counts(df):
-        return df.groupby("db_id")["SMILES"].count()
+        return df.groupby("db_id")[smiles_col].count()
     
     # this is a partition groupby
     counts_per_partition = ddf_merged.map_partitions(partition_counts)
-    final_count = counts_per_partition.groupby("db_id").sum().to_frame().rename(columns={"SMILES":"total_counts"}).compute()
+    final_count = counts_per_partition.groupby("db_id").sum().to_frame().rename(columns={smiles_col: "total_counts"}).compute()
 
     del ddf_merged
-    client.run(gc.collect)
     return final_count
 
 
@@ -66,9 +64,10 @@ def convert_folder(hac_folders: Path | str):
 
 def compute_internal_duplication(
     db_paths: dict[str, str],
-    smiles_col: str = "SMILES",
+    smiles_cols: str = "SMILES",
     block_size: str = "64MB",
     batch_size: int = 2,
+    id_cols: str = "ID"
 ):
     """
     Compute internal deduplication statistics for many databases in smaller batches.
@@ -86,8 +85,8 @@ def compute_internal_duplication(
 
         # Build each batch of Dask operations
         for db_id, path in batch:
-            df = dd.read_parquet(path, columns=[smiles_col], blocksize=block_size)
-            df_dedup = df.drop_duplicates(subset=[smiles_col])
+            df = dd.read_parquet(path, columns=[smiles_cols, id_cols], blocksize=block_size)
+            df_dedup = df.drop_duplicates(subset=id_cols).drop_duplicates(subset=smiles_cols)
             unique = df_dedup.map_partitions(len).sum()
             dedup_dfs[db_id] = df_dedup
             lazy_results.append(unique)
@@ -115,11 +114,10 @@ def get_overlap_by_merge(db1: str, db2: str,
     # it needs for the output based on the input partition sizes.
     out_dir =  Path(f"tmp/{db1}_{db2}")
     shuffle_method = "disk" if on_disk else "tasks"
-    if not out_dir.exists():
-        overlap = dd.merge(df1, df2, on=smiles_col, how="inner", shuffle_method=shuffle_method)
+    overlap = dd.merge(df1, df2, on=smiles_col, how="inner", shuffle_method=shuffle_method)
+    
     if on_disk:
-        if not out_dir.exists():
-            overlap.to_parquet(out_dir, write_index=False, compute=True)
+        overlap.to_parquet(out_dir, write_index=False, compute=True)
         return out_dir
     return overlap # Returns a Dask DataFrame, not computed!
 
@@ -131,7 +129,7 @@ def get_overlapping_databases(
     ):
     
     overlaps={}
-    pairs = list(combinations(dedup_dfs.keys(), 2))
+    pairs = [sorted(x) for x in combinations(dedup_dfs.keys(), 2)]
     for db1, db2 in pairs:  # run n bacthes at a time
         overlap = get_overlap_by_merge(db1, db2, dedup_dfs, smiles_col, on_disk)
         overlaps[f"{db1}_{db2}"] = overlap
@@ -155,7 +153,6 @@ def count_reundancy(
         for smi in sm:
             smiles_to_dbs[smi].update([db1, db2])
         del sm, df
-        client.run(gc.collect)
   
     return smiles_to_dbs, overlap_counts
 
@@ -177,7 +174,7 @@ def save_redundancy(
 
 
 def main():
-    block_size, database_path, smiles_col, out_parquet = parse_args()
+    block_size, database_path, smiles_col, out_parquet, id_col = parse_args()
     
     with performance_report(filename="dask-stats.html"):
         # Batch size can match #workers if desired, but each DB is processed fully partitioned
@@ -197,10 +194,10 @@ def main():
                 continue
             ## look at the file size to decide if on disk or not
             file_sizes = sum([p.stat().st_size for p in hac_folders.glob("*.parquet")])
-            batch_size = 3
+            batch_size = 4
             on_disk = False
             if file_sizes >= size_limit:
-                batch_size = 1
+                batch_size = 2
                 on_disk=True
                 
             (output_stats/hac).mkdir(parents=True, exist_ok=True)
@@ -210,15 +207,12 @@ def main():
             
             classified_folders = convert_folder(hac_folders)
             logger.info(f"computing internal stats {hac}")
-            internal_counts, dedup_dfs = compute_internal_duplication(classified_folders, 
-                                                                      smiles_col, 
-                                                                      block_size, 
-                                                                      batch_size)
+            internal_counts, dedup_dfs = compute_internal_duplication(classified_folders, smiles_col,  block_size, 
+                                                                      batch_size, id_col)
             
             logger.info(f"computing database redundancy {hac}")
             overlaps = get_overlapping_databases(dedup_dfs, smiles_col, on_disk)
             dedup_dfs.clear()
-            
             
             logger.info(f"Save database redundancy {hac}")
             redundant_counts = save_redundancy(overlaps, smiles_col, out_parq)

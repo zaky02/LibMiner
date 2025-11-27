@@ -6,24 +6,27 @@ import argparse
 import pyarrow.parquet as pq
 from FPSim2.scripts.create_fpsim2_fp_db import create_db_file_parallel
 import ray
+import json
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='Clusterize SMILES by generating fingerprints')
+    parser = argparse.ArgumentParser(description='Create a fingerprint database from SMILES')
     parser.add_argument('-o', '--output_smi', type=str, help='The output .smi filename', 
                         required=False, default='all_molecules.smi')
     parser.add_argument('-i','--input_path', type=str, help='The molecular database folder path', required=False,
                         default='Molecular_database')
     parser.add_argument('-b','--batch_size', type=int, help='bacth size', required=False,
                         default=100_000)
-    parser.add_argument('-fp','--fp_size', type=int, help='Fingerprint size', required=False,
-                        default=512)
+    parser.add_argument('-fp','--fp_parm', type=json.loads, help='Fingerprint params', required=False,
+                        default='{"radius": 2, "fpSize": 1024}')
+    parser.add_argument('-ft','--fp_type', type=int, help='Fingerprint type supported by FPSim2', required=False,
+                        default="Morgan")
     parser.add_argument('-oh', '--output_hdf', type=str, help='The output .h5 filename', 
                         required=False, default='fp_db.h5')
     parser.add_argument("-c", "--cpus", type=int, help="number of processors to run the create_db_file_parallel",
                         default=4)
     args = parser.parse_args()
-    return args.input_path, args.output_smi, args.batch_size, args.fp_size, args.output_hdf, args.cpus
+    return args.input_path, args.output_smi, args.batch_size, args.fp_size, args.output_hdf, args.cpus, args.fp_type
 
 
 @ray.remote
@@ -90,7 +93,7 @@ def ray_parquet_to_smi(parquet_files, out_smi, smiles_col="SMILES", id_col="num_
 
 def main():
     
-    input_folder, output_smi, batch_size, fp_size, output_hdf, cpus = parse_args()
+    input_folder, output_smi, batch_size, fp_params, output_hdf, cpus, fp_type = parse_args()
     RDLogger.DisableLog('rdApp.*')
     
     start = time.perf_counter()
@@ -105,8 +108,8 @@ def main():
     create_db_file_parallel(
     smi_file=output_smi, 
     out_file=output_hdf, 
-    fp_type="Morgan", 
-    fp_params={"radius": 2, "fpSize": fp_size}, 
+    fp_type=fp_type, 
+    fp_params=fp_params, 
     full_sanitization=False, 
     num_processes=cpus
 )

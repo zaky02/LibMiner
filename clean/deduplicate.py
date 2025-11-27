@@ -69,7 +69,7 @@ def deduplicator(hac_folders: Path | str, out_path: Path | str, block_size: str 
                                 columns=[*use_cols, "db_id"])
     
     # Deduplicate across all sources using normalized SMILES
-    ddf_merged = ddf_merged.drop_duplicates(subset=[use_cols[0]]).drop_duplicates(subset=use_cols[1])
+    ddf_merged = ddf_merged.drop_duplicates(subset=use_cols[0]).drop_duplicates(subset=use_cols[1])
 
     # Compute number of rows per partition (fast metadata op)
     partition_lengths = ddf_merged.map_partitions(len).compute()

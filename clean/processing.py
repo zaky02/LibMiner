@@ -9,17 +9,22 @@ from rdkit.Chem.MolStandardize import rdMolStandardize
 from rdkit import RDLogger
 from dask.distributed import Client, performance_report
 import pyarrow.parquet as pq
+import datamol as dm
+import json
+
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='Deduplicate SMILES')
+    parser = argparse.ArgumentParser(description='Process SMILES')
     parser.add_argument('-bs', '--blocksize', type=str, help='Block size for dask dataframe. The safest is the default 64MB',  required=False, default='64MB')
     parser.add_argument('-o','--output_path', type=str, help='Output foldr for the database', required=False,
                         default='Molecular_database')
     parser.add_argument('-s', '--group_size', type=int, help='The size of the file groups to read at once, default is 300 Gb', required=False, default=300)
     parser.add_argument("-c", "--use_cols", nargs="+", help="Columns to read", required=False, 
                         default=['ID', "SMILES"])
+    parser.add_argument("-p", "--progress_file", help="file name to keep the progress of the processing", required=False, default="progress_processing.txt")
+    parser.add_argument('-db', '--database', type=str, help='The json file with the databases paths',  required=False, default="db.json")
     args = parser.parse_args()
-    return args.blocksize, args.output_path, args.group_size, args.use_cols
+    return args.database, args.blocksize, args.output_path, args.group_size, args.use_cols, args.progress_file
 
 # -------------------------
 #  ️ Setup Dask cluster in Slurm
@@ -105,6 +110,49 @@ def is_true_peptide(mol: Chem.Mol) -> bool:
         return True
 
     return False
+
+
+def normalize_smiles_dm(smi: str) -> str | None:
+    """Normalize SMILES by:
+    - Converting to canonical isomeric SMILES
+    - Removing salts (keeping largest fragment)
+    - Neutralizing charges
+    
+    Parameters
+    ----------
+    smi : str
+        Input SMILES string
+        
+    Returns
+    ------- 
+    str | None
+        Normalized canonical SMILES or None if invalid
+    """ 
+    if not smi:
+        return None
+    
+    try:
+        mol = dm.to_mol(smi, ordered=True)
+        if mol is None:
+            return None
+        
+        if is_true_peptide(mol): # skip true peptides
+            return None
+        
+        mol = dm.fix_mol(mol, largest_only=True)
+        mol = dm.sanitize_mol(mol, sanifix=True, charge_neutral=False)
+        mol = dm.standardize_mol(
+        mol,
+        disconnect_metals=False,
+        normalize=True,
+        reionize=False,
+        uncharge=True,
+        stereo=True,
+        )
+        return dm.to_smiles(mol, canonical=True, isomeric=True)
+    except Exception:
+        return None
+
 
 def normalize_smiles(smi: str) -> str | None:
     """Normalize SMILES by:
@@ -363,32 +411,19 @@ def check_files(pattern: list[str], db_id: str, use_cols: tuple[str] = ("ID", "S
 # -------------------------
 # 2️⃣ Read databases lazily
 # -------------------------
-base_db = { "001": "Enamine_REAL_65B_parquet/*.parquet",
-            "002": "ZINC22/*.csv",  # H04_to_H24
-            "003": "Savi_parquet/*/*.parquet",
-            "004": "PubChem_parquet/*.parquet",
-            "005": "ChEMBL_parquet/*.parquet",
-            "006": "DrugBank/*.parquet",
-            "007": "Coconut_parquet/*.parquet",
-            "008": "NPAtlas_parquet/*.parquet",
-            "009": "ChemistriX_Clean/VIRTUAL_BIUR_POR_MW_CLEAN/*.parquet",
-            "010": "CHIPMUNK_parquet/*.parquet",
-            "011": "SCUBIDOO_parquet/*.parquet",
-            "012": "SureChEMBL_parquet/*.parquet",
-            "013": "MolPort_parquet/*.parquet"
-        }
 
 def main():
-    block_size, output_folder, group_size, use_cols = parse_args()
+    base_db, block_size, output_folder, group_size, use_cols, progress_file = parse_args()
     
     start = time.perf_counter()
     
+    base_db = json.loads(Path(base_db).read_text())
     with performance_report(filename="dask-HAC.html"):
         db_files = split_csv_groups_by_size(base_db, group_size)
         # Batch size can match #workers if desired, but each DB is processed fully partitioned
         out_path = Path(output_folder)
         out_path.mkdir(parents=True, exist_ok=True)
-        progress = Path("progress_processing.txt")
+        progress = Path(progress_file)
         progress.touch(exist_ok=True)
         for db_id, pattern in db_files.items():
             pattern = check_files(pattern, db_id, use_cols)    
