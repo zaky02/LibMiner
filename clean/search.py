@@ -4,6 +4,7 @@ import argparse
 import duckdb
 import pandas as pd
 from pathlib import Path
+from dataclasses import dataclass
 
 
 def parse_args():
@@ -22,91 +23,143 @@ def parse_args():
     return args.db_name, args.molecular_database, args.index_file, args.top_k, args.threshold, args.num_workers, args.output_file, args.query_path, args.on_disk
 
 
-def querying(
-    db_name:str, 
-    query: str | list[str], 
-    top_k: int=100,
-    threshold: float = 0.5,
-    workers=4,
-    on_disk=True):
+@dataclass
+class SimilaritySearch:
+    db_name:str
+    index_file: str
+    database_path: str
     
-    fpe = FPSim2Engine(db_name)
-    search = {}
-    if isinstance(query, str):
-        query = [query]
-    for que in query:
-        if on_disk:
-            results = fpe.on_disk_top_k(query, k=top_k, threshold=threshold, metric='tanimoto', n_workers=workers) 
-        else:
-            results = fpe.top_k(query, k=top_k, threshold=threshold, metric='tanimoto', n_workers=workers)
-        search[que] = results
+    def querying(
+        self, 
+        query: str | list[str], 
+        top_k: int=100,
+        threshold: float = 0.5,
+        workers: int=4,
+        on_disk: bool=True):
         
-    return search
+        fpe = FPSim2Engine(self.db_name)
+        search = {}
+        if isinstance(query, str):
+            query = [query]
+        for que in query:
+            if on_disk:
+                results = fpe.on_disk_top_k(query, k=top_k, threshold=threshold, metric='tanimoto', n_workers=workers) 
+            else:
+                results = fpe.top_k(query, k=top_k, threshold=threshold, metric='tanimoto', n_workers=workers)
+            search[que] = results
+            
+        return search
 
 
-def find_hac_by_index(index_file: str, search_results: dict[str, np.array]):
-    with open(index_file, "r") as st:
-        lines = {int(x.strip().split("#")[-1]): int(x.split("#")[0].strip("HAC")) for x in st.readlines()}
-    index_dict = {}
-    bounds = np.array(sorted(lines.keys()))
-    for query, result in search_results.items():
-        index = sorted([x[0] for x in result])
-        i = np.unique(np.searchsorted(bounds, index, side="right"))
-        hacs = [lines.get(x) for x in bounds[i]]
-        index_dict[query] = hacs
-    return index_dict
+    def find_hac_by_index(self, search_results: dict[str, np.array]):
+        """
+        Given the indices of the search results find in which HAC the molecule is found and reduce the scopre when
+        retrieving the SMILES strings
 
-def convert_hac_topath(
-    hac_dict: dict[str, str], 
-    database_path: str):
-    parquet_paths = {}
-    for query, hac in hac_dict.items():
-        parquet_paths[query] = f"{database_path}/HAC_{hac}/*.parquet"
-    return parquet_paths
+        Parameters
+        ----------
+        search_results : dict[str, np.array]
+            _description_
 
-def retrieve_smiles(
-    duck_con,
-    indices: list[int],
-    parquet_path: list[str],
-    ):
-    
-    res = duck_con.execute(f"SELECT SMILES, db_id, num_ID FROM read_parquet($path) WHERE num_ID IN $indices)", {"path": parquet_path, "indices": indices}).df()
-    return res
+        Returns
+        -------
+        _type_
+            _description_
+        """
+        with open(self.index_file, "r") as st:
+            lines = {int(x.strip().split("#")[-1]): int(x.split("#")[0].strip("HAC")) for x in st.readlines()}
+        index_dict = {}
+        bounds = np.array(sorted(lines.keys()))
+        for query, result in search_results.items():
+            index = sorted([x[0] for x in result])
+            i = np.unique(np.searchsorted(bounds, index, side="right"))
+            hacs = [lines.get(x) for x in bounds[i]]
+            index_dict[query] = hacs
+        return index_dict
 
-def batch_retrieve(
-    search_result: dict[str, int], 
-    parquet_paths: dict[str, str],
-    ):
-    
-    #extract the index from the FPSIM2 results and generate the combined path and indices
-    """
-    Batch retrieve SMILES and db_id from the database using the results of FPSIM2 search and the parquet file paths.
+    def convert_hac_topath(self,
+        hac_dict: dict[str, str], 
+        ):
+        parquet_paths = {}
+        for query, hac in hac_dict.items():
+            parquet_paths[query] = f"{self.database_path}/HAC_{hac}/*.parquet"
+        return parquet_paths
 
-    Args:
-        search_result (dict[str, int]): The result of FPSIM2 search, where the key is the query molecule and the value is the index of the retrieved molecules.
-        parquet_paths (dict[str, str]): A dictionary containing the parquet file paths, where the key is the query molecule and the value is the path to the parquet files.
-
-    Returns:
-        dict[str, pd.DataFrame]: A dictionary containing the retrieved SMILES and db_id, where the key is the query molecule and the value is a pandas DataFrame containing the retrieved results.
-    """
-
-    index_dict = {query: sorted([u[0] for u in ind]) for query, ind in search_result.items()}
-    parquet = set()
-    index = set()
-    for i in parquet_paths.values():
-        parquet.update(i)
-    for i in index_dict.values():
-        index.update(i)
+    def retrieve_smiles(
+        duck_con,
+        indices: list[int],
+        parquet_path: list[str],
+        ):
         
-    result = {}
-    # connect to database and search using the combined indices and parquet files   
-    db_con = duckdb.connect()
-    res = retrieve_smiles(db_con, sorted(index), list(parquet))
-    for query, index in index_dict.items():
-        result[query] = res[res["num_ID"].isin(index)]
-    
-    return result
+        res = duck_con.execute(f"SELECT SMILES, db_id, num_ID FROM read_parquet($path) WHERE num_ID IN $indices)", {"path": parquet_path, "indices": indices}).df()
+        return res
 
+    def batch_retrieve(
+        self,
+        search_result: dict[str, int], 
+        parquet_paths: dict[str, str],
+        ):
+        
+        #extract the index from the FPSIM2 results and generate the combined path and indices
+        """
+        Batch retrieve SMILES and db_id from the database using the results of FPSIM2 search and the parquet file paths.
+
+        Args:
+            search_result (dict[str, int]): The result of FPSIM2 search, where the key is the query molecule and the value is the index of the retrieved molecules.
+            parquet_paths (dict[str, str]): A dictionary containing the parquet file paths, where the key is the query molecule and the value is the path to the parquet files.
+
+        Returns:
+            dict[str, pd.DataFrame]: A dictionary containing the retrieved SMILES and db_id, where the key is the query molecule and the value is a pandas DataFrame containing the retrieved results.
+        """
+
+        index_dict = {query: sorted([u[0] for u in ind]) for query, ind in search_result.items()}
+        parquet = set()
+        index = set()
+        for i in parquet_paths.values():
+            parquet.update(i)
+        for i in index_dict.values():
+            index.update(i)
+            
+        result = {}
+        # connect to database and search using the combined indices and parquet files   
+        db_con = duckdb.connect()
+        res = self.retrieve_smiles(db_con, sorted(index), list(parquet))
+        for query, index in index_dict.items():
+            result[query] = res[res["num_ID"].isin(index)]
+        
+        return result
+    
+    def run(self, query: str | list[str], 
+        top_k: int=100,
+        threshold: float = 0.5,
+        num_workers: int=4,
+        on_disk: bool=True):
+        """
+        A convenient function to run the similarity search
+
+        Parameters
+        ----------
+        query : str | list[str]
+            _description_
+        top_k : int, optional
+            _description_, by default 100
+        threshold : float, optional
+            _description_, by default 0.5
+        num_workers : int, optional
+            _description_, by default 4
+        on_disk : bool, optional
+            _description_, by default True
+
+        Returns
+        -------
+        _type_
+            _description_
+        """
+        search_results = self.querying(query, top_k, threshold, num_workers, on_disk)
+        hac_dict = self.find_hac_by_index( search_results)
+        parquet_paths = self.convert_hac_topath(hac_dict)
+        smiles = self.batch_retrieve(search_results, parquet_paths)
+        return pd.concat(smiles)
 
 def main():
     db_name, molecular_database, index_file, top_k, threshold, num_workers, output_file, query_path, on_disk = parse_args()
@@ -114,12 +167,11 @@ def main():
     with open(query_path) as w:
         query = [x.strip() for x in w.readlines()]
 
-    search_results = querying(db_name, query, top_k, threshold, num_workers, on_disk)
-    hac_dict = find_hac_by_index(index_file, search_results)
-    parquet_paths = convert_hac_topath(hac_dict, molecular_database)
-    smiles = batch_retrieve(search_results, parquet_paths)
+    search = SimilaritySearch(db_name, index_file, molecular_database)
+    smiles = search.run(query, top_k, threshold, num_workers, on_disk)
+    
     Path(output_file).parents.mkdir(parents=True, exist_ok=True)
-    pd.concat(smiles).to_csv(output_file)
+    smiles.to_csv(output_file)
     
     
 if __name__ == "__main__":
