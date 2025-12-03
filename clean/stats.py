@@ -10,7 +10,7 @@ import dask
 import pandas as pd
 import shutil
 import logging
-
+import gc
 
 
 def parse_args():
@@ -25,7 +25,6 @@ def parse_args():
     
     args = parser.parse_args()
     return args.blocksize, args.database_path, args.smiles_col, args.output_parquet, args.id_col
-
 
 
 scheduler_address = os.environ["DASK_SCHEDULER_ADDRESS"]
@@ -46,9 +45,11 @@ def compute_count(hac_folders, smiles_col="SMILES", block_size="64MB"):
     
     # this is a partition groupby
     counts_per_partition = ddf_merged.map_partitions(partition_counts)
-    final_count = counts_per_partition.groupby("db_id").sum().to_frame().rename(columns={smiles_col: "total_counts"}).compute()
+    final_count = counts_per_partition.groupby("db_id").sum().to_frame().rename(columns={smiles_col: "initial_counts"}).compute()
 
     del ddf_merged
+    client.run(gc.collect)
+
     return final_count
 
 
@@ -95,7 +96,7 @@ def compute_internal_duplication(
         computed_values = dask.compute(*lazy_results)
         counts.update(dict(zip([db_id for db_id, _ in batch], computed_values)))
 
-    return pd.Series(counts, name="internal_counts"), dedup_dfs
+    return pd.Series(counts, name="after_internal_deduplication"), dedup_dfs
 
 
 def get_overlap_by_merge(db1: str, db2: str, 
@@ -153,7 +154,9 @@ def count_reundancy(
         for smi in sm:
             smiles_to_dbs[smi].update([db1, db2])
         del sm, df
-  
+        
+    client.run(gc.collect)
+    
     return smiles_to_dbs, overlap_counts
 
 
@@ -219,15 +222,18 @@ def main():
             
             overlaps.clear()
             # save to disk the results
-            pd.concat([sta, internal_counts], axis=1).to_csv(output_stats/hac/"after_before_counts.csv")
-            redundant_counts.to_csv(output_stats/hac/"overlaping_counts.csv")
+            pd.concat([sta, internal_counts], axis=1).to_csv(output_stats/hac/"internal_duplication.csv")
+            redundant_counts.to_csv(output_stats/hac/"pairwise_duplication.csv")
 
             with open(progress, "a") as f:
                 f.write(f"HAC {hac} done\n")
             
             if Path(f"tmp").exists():
                 shutil.rmtree(f"tmp", ignore_errors=True)
-
+                
+        for n in ["pairwise_duplication.csv", "internal_duplication.csv"]:
+            files = Path(output_stats).glob(f"*/{n}")
+            pd.concat({f.parents.name: pd.read_csv(f, index_col=0) for f in files}).to_csv(output_stats/f"total_{n}")
         
 if __name__ == "__main__":
     # Run this if this file is executed from command line but not if is imported as API
