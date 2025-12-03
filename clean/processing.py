@@ -5,20 +5,21 @@ import argparse
 import pandas as pd
 import dask.dataframe as dd
 from rdkit import Chem
-from rdkit.Chem.MolStandardize import rdMolStandardize
-from rdkit import RDLogger
+from rdkit import rdBase
 from dask.distributed import Client, performance_report
 import pyarrow.parquet as pq
 import datamol as dm
 import json
+import gc
+import re
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Process SMILES')
     parser.add_argument('-bs', '--blocksize', type=str, help='Block size for dask dataframe. The safest is the default 64MB',  required=False, default='64MB')
-    parser.add_argument('-o','--output_path', type=str, help='Output foldr for the database', required=False,
+    parser.add_argument('-o','--output_path', type=str, help='Output folder for the database', required=False,
                         default='Molecular_database')
-    parser.add_argument('-s', '--group_size', type=int, help='The size of the file groups to read at once, default is 300 Gb', required=False, default=300)
+    parser.add_argument('-s', '--group_size', type=int, help='The size of the file groups to read at once, default is 100 Gb for parquet files', required=False, default=100)
     parser.add_argument("-c", "--use_cols", nargs="+", help="Columns to read", required=False, 
                         default=['ID', "SMILES"])
     parser.add_argument("-p", "--progress_file", help="file name to keep the progress of the processing", required=False, default="progress_processing.txt")
@@ -28,8 +29,7 @@ def parse_args():
 
 # -------------------------
 #  ️ Setup Dask cluster in Slurm
-# -------------------------
-
+# -------------------------    
 scheduler_address = os.environ["DASK_SCHEDULER_ADDRESS"]
 
 client = Client(scheduler_address)    # Connect to that cluster
@@ -38,10 +38,33 @@ client.wait_for_workers(n_workers=1, timeout=180)
 # -------------------------
 # 1️⃣ Setup RDKit tools
 # -------------------------
-RDLogger.DisableLog('rdApp.*')
+blocker = rdBase.BlockLogs()
 
 PEPTIDE_SMARTS = "[NX3:1][CX3:2](=[OX1:20])[CX4:3][NX3:4][CX3:5](=[OX1:21])" # dipeptide motif
 Q = Chem.MolFromSmarts(PEPTIDE_SMARTS)
+unsatu = Chem.MolFromSmarts('[CD2;R0]=[CD2;R0][CD2;R0]=[CD2;R0][CD2;R0]=[CD2;R0][CD2;R0]=[CD2;R0][CD2;R0]=[C;R0]')
+
+tokenizer = re.compile(
+        r'(\[[^\]]+\]|Br?|Cl?|N|O|S|P|F|I|B|C|b|c|n|o|s|p|\(|\)|\.|\=|\#|\-|\+|\\\\|\/|\:|\~|\@|\?|>>?|\*|\$|\%[0-9]{2}|[0-9])'
+    )
+
+halogen = re.compile(r'Br|Cl|F|I')
+glycol = Chem.MolFromSmarts('CCOCCOCCO')
+
+rare = {
+    'He', 'Li', 'Be', 'Ne',
+    'Na', 'Mg', 'Al', 'Ar', 'K', 'Ca',
+    'Sc', 'Ti', 'V', 'Cr', 'Mn', 'Fe', 'Co', 'Ni', 'Cu', 'Zn',
+    'Ga', 'Ge', 'As', 'Se', 'Kr', 'Rb', 'Sr', 'Y', 'Zr',
+    'Nb', 'Mo', 'Tc', 'Ru', 'Rh', 'Pd', 'Ag', 'Cd', 'In', 'Sn',
+    'Sb', 'Te', 'Xe', 'Cs', 'Ba', 'La', 'Ce', 'Pr', 'Nd',
+    'Pm', 'Sm', 'Eu', 'Gd', 'Tb', 'Dy', 'Ho', 'Er', 'Tm', 'Yb',
+    'Lu', 'Hf', 'Ta', 'W', 'Re', 'Os', 'Ir', 'Pt', 'Au', 'Hg',
+    'Tl', 'Pb', 'Bi', 'Po', 'At', 'Rn', 'Fr', 'Ra', 'Ac', 'Th',
+    'Pa', 'U', 'Np', 'Pu', 'Am', 'Cm', 'Bk', 'Cf', 'Es', 'Fm',
+    'Md', 'No', 'Lr', 'Rf', 'Db', 'Sg', 'Bh', 'Hs', 'Mt', 'Ds',
+    'Rg', 'Cn', 'Fl', 'Lv', 'Ts', 'Og'}
+
 
 def _amide_cn_bond_not_ring(mol, a_idx, c_idx):
     b = mol.GetBondBetweenAtoms(a_idx, c_idx)
@@ -112,48 +135,6 @@ def is_true_peptide(mol: Chem.Mol) -> bool:
     return False
 
 
-def normalize_smiles_dm(smi: str) -> str | None:
-    """Normalize SMILES by:
-    - Converting to canonical isomeric SMILES
-    - Removing salts (keeping largest fragment)
-    - Neutralizing charges
-    
-    Parameters
-    ----------
-    smi : str
-        Input SMILES string
-        
-    Returns
-    ------- 
-    str | None
-        Normalized canonical SMILES or None if invalid
-    """ 
-    if not smi:
-        return None
-    
-    try:
-        mol = dm.to_mol(smi, ordered=True)
-        if mol is None:
-            return None
-        
-        if is_true_peptide(mol): # skip true peptides
-            return None
-        
-        mol = dm.fix_mol(mol, largest_only=True)
-        mol = dm.sanitize_mol(mol, sanifix=True, charge_neutral=False)
-        mol = dm.standardize_mol(
-        mol,
-        disconnect_metals=False,
-        normalize=True,
-        reionize=False,
-        uncharge=True,
-        stereo=True,
-        )
-        return dm.to_smiles(mol, canonical=True, isomeric=True)
-    except Exception:
-        return None
-
-
 def normalize_smiles(smi: str) -> str | None:
     """Normalize SMILES by:
     - Converting to canonical isomeric SMILES
@@ -174,28 +155,44 @@ def normalize_smiles(smi: str) -> str | None:
         return None
     
     try:
-        mol = Chem.MolFromSmiles(smi, sanitize=True)
-        if mol is None:
-            return None
-        
-        if is_true_peptide(mol): # skip true peptides
-            return None
-        
-        mol = rdMolStandardize.Normalize(mol)  
-        
-        # Apply uncharging only if charges are present
-        if "+" in smi or "-" in smi:
-            uncharger = rdMolStandardize.Uncharger()
-            mol = uncharger.uncharge(mol)
+        with dm.without_rdkit_log():
+            mol = dm.to_mol(smi, ordered=False)
+            if mol is None:
+                return None
             
-        # Apply salt removal only if multiple fragments
-        if "." in smi:
-            lfs = rdMolStandardize.LargestFragmentChooser()
-            mol = lfs.choose(mol)
+            mol = dm.fix_mol(mol, largest_only=True if "." in smi else False)
+            
+            mol = dm.standardize_mol(
+            mol,
+            disconnect_metals=False,
+            normalize=True,
+            reionize=True if "+" in smi or "-" in smi else False,
+            uncharge=False,
+            stereo=False,
+            )
+            
+            # filtrado por moleculas que contienen isotopos o metales
+            if is_true_peptide(mol): # skip true peptides
+                return None
+            #poli ethylene glycol
+            if mol.HasSubstructMatch(glycol):
+                return None
+            if mol.HasSubstructMatch(unsatu):
+                return None
 
-        Chem.SanitizeMol(mol)      # ensure valid again after modifications, it is in place
-
-        return Chem.MolToSmiles(mol, canonical=True, isomericSmiles=True)
+            sma = Chem.MolToSmiles(mol, canonical=True, isomericSmiles=False)
+            
+            tokens = tokenizer.findall(sma)
+            
+            for atom in tokens:
+                if atom.strip("[]") in rare:
+                    return None
+                
+            if len(halogen.findall(sma)) >= 6:
+                return None
+                                  
+        return sma
+    
     except Exception:
         return None
     
@@ -214,7 +211,7 @@ def get_hac(smi: str) -> int:
 
 def split_csv_groups_by_size(
     base_paths: dict[str, list[str, list[str]]],
-    size_limit_gb: int = 300
+    size_limit_gb: int = 100
 ) -> dict[str, list[str]]:
     """
     Dynamically split large CSV datasets into groups of ~size_limit_gb.
@@ -334,6 +331,8 @@ def write_db_by_hac(db_id: str, pattern: list[str], output_folder: Path,
     )
 
     del ddf
+    client.run(gc.collect)
+
     print(f"DB {db_id} written to {output_folder}")
 
 
