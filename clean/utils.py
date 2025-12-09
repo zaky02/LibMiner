@@ -80,3 +80,15 @@ def stereo_expansion(df: pd.DataFrame, n_variants: int=20,
         dm.to_df(mol, n_jobs=n_jobs, smiles_column="SMILES") for i, mol in enumerate(out)}
     
     return pd.concat(smiles)
+
+
+def convert_hac_to_mw(hac: int):
+    """Convert HAC to MW threshold"""
+    return (hac * 12) + (2 * hac)
+
+
+def convert_mw_to_hac(mw: float | None):
+    """Convert MW threshold to HAC"""
+    if mw is None:
+        return mw
+    return int(mw / 14)    
