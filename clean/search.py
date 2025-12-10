@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Sequence
 from utils import convert_hac_to_mw, convert_mw_to_hac
 from functools import partial
+import datamol as dm
 
 
 def parse_args():
@@ -80,6 +81,22 @@ class FPSim2Query:
             search[que] = [int(x[0]) for x in results]
 
         return search, None
+    
+    def _match_smiles(self, smi: str, query_mol: dm.Mol) -> bool:
+        mol = dm.to_mol(smi)
+        return mol.HasSubstructMatch(query_mol)
+    
+    def match_substructure(self,
+                           df_dict: dict[str, pd.DataFrame],
+                           ) -> dict[str, pd.DataFrame]:
+        """Perform substructure matching to filter false positives"""
+        subs = {}
+        for que in self.queries:
+            query_mol = dm.to_mol(que)
+            mask = dm.parallelized(partial(self._match_smiles, query_mol=query_mol), df_dict[que]["SMILES"], n_jobs=self.workers, progress=False, scheduler="threads")
+            subs[que] = df_dict[que][mask]
+            
+        return subs
 
 
 @dataclass
@@ -214,7 +231,7 @@ class RetrieveSmiles:
         hac_dict = self.find_hac_by_index(search_results)
         parquet_paths = self.convert_hac_topath(hac_dict)
         smiles = self.batch_retrieve(search_results, parquet_paths, more_data)
-        return pd.concat(smiles)
+        return smiles
 
 
 def main():
@@ -229,9 +246,10 @@ def main():
     
     retrieve = RetrieveSmiles(index_file, molecular_database, mw_range, hac_limits)
     smiles = retrieve.run(search_results, more_data=tanimoto)
-    
+    if search_type == "substructure":
+        smiles = fp.match_substructure(smiles)
     Path(output_file).parents.mkdir(parents=True, exist_ok=True)
-    smiles.to_csv(output_file)
+    pd.concat(smiles).to_csv(output_file)
     
     
 if __name__ == "__main__":
