@@ -1,6 +1,7 @@
 import datamol as dm
 from pathlib import Path
 import pandas as pd
+from functools import partial
 
 
 def rename_partitions(output_folder: Path):
@@ -63,17 +64,14 @@ def stereo_expansion(df: pd.DataFrame, n_variants: int=20,
     """
 
     mols = dm.from_df(df, smiles_column="SMILES") 
-    inputs = [{"mol": mol, "clean_it":False, "n_variants":n_variants, 
-               "timeout_seconds":timeout_seconds} for mol in mols]
-    
     # generate stereoisomers
     out = dm.parallelized( 
-    dm.enumerate_stereoisomers,
-    inputs,
+    partial(dm.enumerate_stereoisomers, clean_it=False, n_variants=n_variants, 
+            timeout_seconds=timeout_seconds),
+    mols,
     progress=False,
     n_jobs=n_jobs,
     scheduler="threads",
-    arg_type="kwargs",
     )
     
     smiles = {dm.to_smiles(mols[i], canonical=True, isomeric=True): 
