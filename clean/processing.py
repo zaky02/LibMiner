@@ -19,7 +19,7 @@ def parse_args():
     parser.add_argument('-bs', '--blocksize', type=str, help='Block size for dask dataframe. The safest is the default 64MB',  required=False, default='64MB')
     parser.add_argument('-o','--output_path', type=str, help='Output folder for the database', required=False,
                         default='Molecular_database')
-    parser.add_argument('-s', '--group_size', type=int, help='The size of the file groups to read at once, default is 100 Gb for parquet files', required=False, default=100)
+    parser.add_argument('-s', '--group_size', type=int, help='The size of the file groups to read at once, default is 100 Gb for parquet files', required=False, default=150)
     parser.add_argument("-c", "--use_cols", nargs="+", help="Columns to read", required=False, 
                         default=['ID', "SMILES"])
     parser.add_argument("-p", "--progress_file", help="file name to keep the progress of the processing", required=False, default="progress_processing.txt")
@@ -40,7 +40,7 @@ client.wait_for_workers(n_workers=1, timeout=180)
 # -------------------------
 blocker = rdBase.BlockLogs()
 
-PEPTIDE_SMARTS = "[NX3:1][CX3:2](=[OX1:20])[CX4:3][NX3:4][CX3:5](=[OX1:21])" # dipeptide motif
+PEPTIDE_SMARTS = "[NX3:1][CX3:2](=[OX1:20])[CX4:4][NX3:5][CX3:6](=[OX1:60])[CX4:7][NX3:8][CX3:9](=[OX1:90])[CX4:10]" # dipeptide motif
 Q = Chem.MolFromSmarts(PEPTIDE_SMARTS)
 unsatu = Chem.MolFromSmarts('[CD2;R0]=[CD2;R0][CD2;R0]=[CD2;R0][CD2;R0]=[CD2;R0][CD2;R0]=[CD2;R0]')
 
@@ -112,9 +112,12 @@ def is_true_peptide(mol: Chem.Mol) -> bool:
 
         n1 = mapnum_to_idx[1]
         c1 = mapnum_to_idx[2]
-        spacer_c = mapnum_to_idx[3]
+        ca1 = mapnum_to_idx[3]
         n2 = mapnum_to_idx[4]
         c2 = mapnum_to_idx[5]
+        ca2 = mapnum_to_idx[6]
+        n3 = mapnum_to_idx[7]
+        c3 = mapnum_to_idx[8]
         # oxygens are 20,21 if you need them: o1 = mapnum_to_idx[20]; o2 = mapnum_to_idx[21]
 
         # 1) all matched atoms (including oxygens) must be non-ring
@@ -122,12 +125,16 @@ def is_true_peptide(mol: Chem.Mol) -> bool:
             continue
 
         # 2) both amide C-N bonds must not be ring bonds
-        if not (_amide_cn_bond_not_ring(mol, n1, c1) and _amide_cn_bond_not_ring(mol, n2, c2)):
+        if not (_amide_cn_bond_not_ring(mol, n1, c1) and 
+                _amide_cn_bond_not_ring(mol, n2, c2) and 
+                _amide_cn_bond_not_ring(mol, n3, c3)):
+            
             continue
 
         # 3) require a NON-RING carbon neighbor on the non-amide side of each carbonyl carbon
         if not (_has_nonring_carbon_on_nonamide_side(mol, c1, n1) and
-                _has_nonring_carbon_on_nonamide_side(mol, c2, n2)):
+                _has_nonring_carbon_on_nonamide_side(mol, c2, n2) and 
+                _has_nonring_carbon_on_nonamide_side(mol, c3, n3)):
             continue
 
         return True
@@ -211,7 +218,7 @@ def get_hac(smi: str) -> int:
 
 def split_csv_groups_by_size(
     base_paths: dict[str, list[str, list[str]]],
-    size_limit_gb: int = 100
+    size_limit_gb: int = 150
 ) -> dict[str, list[str]]:
     """
     Dynamically split large CSV datasets into groups of ~size_limit_gb.
