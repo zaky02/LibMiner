@@ -8,6 +8,7 @@ from dask.distributed import Client, performance_report
 import pandas as pd
 import gc
 
+
 def parse_args():
     parser = argparse.ArgumentParser(description='Deduplicate SMILES')
     parser.add_argument('-bs', '--blocksize', type=str, help='Block size for dask dataframe. The safest is the default 64 MB',  required=False, default='64MB')

@@ -4,13 +4,13 @@ import os
 from pathlib import Path
 import argparse
 from collections import defaultdict
-import dask
 from itertools import combinations
 import dask
 import pandas as pd
 import shutil
 import logging
 import gc
+from utils import convert_folder
 
 
 def parse_args():
@@ -51,16 +51,6 @@ def compute_count(hac_folders, smiles_col="SMILES", block_size="64MB"):
     client.run(gc.collect)
 
     return final_count
-
-
-def convert_folder(hac_folders: Path | str):
-    hac_folders = Path(hac_folders)
-    pa = list(hac_folders.glob("*.parquet"))
-    clas = defaultdict(list)
-    for p in pa:
-        db = p.stem.split("_")[1].split("_")[0].strip("db")
-        clas[db].append(p)
-    return clas
 
 
 def compute_internal_duplication(
@@ -179,15 +169,15 @@ def save_redundancy(
 def main():
     block_size, database_path, smiles_col, out_parquet, id_col = parse_args()
     
-    with performance_report(filename="dask-stats.html"):
+    with performance_report(filename="dask-pairwise.html"):
         # Batch size can match #workers if desired, but each DB is processed fully partitioned
         database_path = Path(database_path)
-        output_stats = database_path/"stats"
-        progress = Path("progress_stats.txt")
+        output_stats = database_path/"pairwise"
+        progress = Path("progress_pairwise.txt")
         progress.touch(exist_ok=True)
         hacs = sorted(database_path.glob("HAC_*"), key=lambda x: int(x.name.split("_")[-1]))
         
-        logger.info(f"start count from: {database_path}")
+        logger.info(f"start pairwise deduplication: {database_path}")
         size_limit = 50 * (1024 ** 3)   
         for hac_folders in hacs:
             hac = hac_folders.name.split("_")[-1]

@@ -322,12 +322,12 @@ def write_db_by_hac(db_id: str, pattern: list[str], output_folder: Path,
     ddf = ddf.dropna(subset=["SMILES"])
 
     # Normalize SMILES
-    ddf["SMILES"] = ddf.map_partitions(lambda df: df["SMILES"].map(normalize_smiles), meta=("SMILES", str))
-    ddf = ddf.dropna(subset=["SMILES"])
+    ddf["canonical_SMILES"] = ddf.map_partitions(lambda df: df["SMILES"].map(normalize_smiles), meta=("SMILES", str))
+    ddf = ddf.dropna(subset=["canonical_SMILES"])
     ddf["db_id"] = group_id
     
     # HAC calculation
-    ddf["HAC"] = ddf.map_partitions(lambda df: df["SMILES"].map(get_hac), meta=("HAC", int))
+    ddf["HAC"] = ddf.map_partitions(lambda df: df["canonical_SMILES"].map(get_hac), meta=("HAC", int))
     ddf = ddf.astype(meta)
     # Write all partitions in parallel, grouped by HAC
     ddf.to_parquet(

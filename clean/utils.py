@@ -2,6 +2,25 @@ import datamol as dm
 from pathlib import Path
 import pandas as pd
 from functools import partial
+from molfeat.trans.base import MoleculeTransformer
+import pandas as pd
+import numpy as np
+from dataclasses import dataclass
+from typing import Sequence
+from collections import defaultdict
+
+
+def convert_folder(hac_folders: Path | str, keep: list[str] = []) -> dict[str, list[Path]]:
+    hac_folders = Path(hac_folders)
+    pa = list(hac_folders.glob("*.parquet"))
+    clas = defaultdict(list)
+    for p in pa:
+        db = p.stem.split("_")[1].split("_")[0].strip("db")
+        
+        if keep and db not in keep: continue
+
+        clas[db].append(p)
+    return clas
 
 
 def rename_partitions(output_folder: Path):
@@ -41,15 +60,15 @@ def rename_partitions(output_folder: Path):
 
 
 
-def stereo_expansion(df: pd.DataFrame, n_variants: int=20, 
+def stereo_expansion(smiles: list[str], n_variants: int=20, 
                      timeout_seconds: int=None, n_jobs: int=-1) -> pd.DataFrame:
     """
     Generate n_variants stereoisomers
 
     Parameters
     ----------
-    df : pd.DataFrame
-        The input dataframe containing SMILES
+    smiles : list[str]
+        The input list of SMILES strings
     n_variants : int, optional
         The number of stereoisomers, by default 20
     timeout_seconds : int, optional
@@ -63,7 +82,7 @@ def stereo_expansion(df: pd.DataFrame, n_variants: int=20,
         The dataframe with expanded stereoisomers
     """
 
-    mols = dm.from_df(df, smiles_column="SMILES") 
+    mols = [dm.to_mol(smi) for smi in smiles]
     # generate stereoisomers
     out = dm.parallelized( 
     partial(dm.enumerate_stereoisomers, clean_it=False, n_variants=n_variants, 
@@ -90,3 +109,64 @@ def convert_mw_to_hac(mw: float | None):
     if mw is None:
         return mw
     return int(mw / 14)    
+
+
+@dataclass
+class Rerank:
+    """Rerank search results based on calculated properties"""
+    
+    feature: str = "scaffoldkeys"
+    n_jobs: int = 1
+    
+    def property_calculation(self,
+                             smiles: list[str],
+                             index: Sequence | None = None) -> pd.DataFrame:
+        """
+        Calculate properties for a list of SMILES, 
+        which can be used to rerank the results from the similarity search
+        """
+        transformer = MoleculeTransformer(featurizer=self.feature, dtype=int, 
+                                          n_jobs=self.n_jobs)
+        features = transformer(smiles)
+        
+        return pd.DataFrame(features, columns=transformer.columns, 
+                            index=smiles if index is None else index)
+
+    def normalized_distances_to_reference(self, vectors, reference_idx=0):
+        """
+        1. Normalize features to comparable ranges
+        2. Compute distances in normalized space
+        """
+        # Method A: Min-max normalization per feature
+        min_vals = vectors.min(axis=0)
+        max_vals = vectors.max(axis=0)
+        range_vals = max_vals - min_vals
+        range_vals[range_vals == 0] = 1  # Avoid division by zero
+        
+        normalized = (vectors - min_vals) / range_vals
+        
+        # Reference in normalized space
+        ref_norm = normalized[reference_idx]
+        
+        # Distances in normalized space
+        distances = np.sqrt(np.sum((normalized - ref_norm) ** 2, axis=1))
+        #ranking = np.argsort(distances)
+        
+        return distances
+    
+    def compute(self,
+                smiles: list[str],
+                index: Sequence | None = None,
+                reference_idx: int = 0) -> pd.DataFrame:
+        """
+        Compute normalized distances to a reference molecule
+        """
+        features_df = self.property_calculation(smiles, index=index)
+        vectors = features_df.values
+        
+        distances = self.normalized_distances_to_reference(vectors,
+                                                           reference_idx=reference_idx)
+    
+        features_df["distances"] = distances
+         
+        return features_df.sort_values("distances")

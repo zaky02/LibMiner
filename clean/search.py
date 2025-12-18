@@ -188,7 +188,7 @@ class RetrieveSmiles:
         """ 
         Retrieve the SMILES from the databases and convert them into Dataframes
         """
-        res = duck_con.execute(f"SELECT SMILES, db_id, num_ID FROM read_parquet($path) WHERE num_ID IN $indices)", {"path": parquet_path, "indices": indices}).df()
+        res = duck_con.execute(f"ID, SELECT SMILES, db_id, num_ID FROM read_parquet($path) WHERE num_ID IN $indices)", {"path": parquet_path, "indices": indices}).df()
         return res
 
     def batch_retrieve(
