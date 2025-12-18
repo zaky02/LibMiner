@@ -45,7 +45,7 @@ def compute_count(hac_folders, smiles_col="SMILES", block_size="64MB"):
     
     # this is a partition groupby
     counts_per_partition = ddf_merged.map_partitions(partition_counts)
-    final_count = counts_per_partition.groupby("db_id").sum().to_frame().rename(columns={smiles_col: "initial_counts"}).compute()
+    final_count = counts_per_partition.groupby("db_id").sum().to_frame().rename(columns={smiles_col: "dropna_counts"}).compute()
 
     del ddf_merged
     client.run(gc.collect)
@@ -77,7 +77,8 @@ def compute_internal_duplication(
         # Build each batch of Dask operations
         for db_id, path in batch:
             df = dd.read_parquet(path, columns=[smiles_cols, id_cols], blocksize=block_size)
-            df_dedup = df.drop_duplicates(subset=id_cols).drop_duplicates(subset=smiles_cols)
+            # El drop ID nunca debe hacerse en el pairwise
+            df_dedup = df.drop_duplicates(subset=smiles_cols)
             unique = df_dedup.map_partitions(len).sum()
             dedup_dfs[db_id] = df_dedup
             lazy_results.append(unique)
@@ -153,8 +154,10 @@ def count_reundancy(
 def save_redundancy(
     overlaps: dict[str, dd.DataFrame | pd.DataFrame | Path],
     smiles_col: str ="SMILES",
-    output: str | Path ="redundant_smiles.parquet"): 
-
+    output: str | Path ="redundant_smiles.parquet"):
+    """
+    Save the redundancy information to a parquet file and return the counts as a pandas Series.
+    """
     smiles_to_dbs, counts = count_reundancy(overlaps, smiles_col)
     smiles_overlap_df = pd.DataFrame({
                 "SMILES": list(smiles_to_dbs.keys()),

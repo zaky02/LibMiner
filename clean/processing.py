@@ -187,7 +187,7 @@ def normalize_smiles(smi: str) -> str | None:
             if mol.HasSubstructMatch(unsatu):
                 return None
 
-            sma = Chem.MolToSmiles(mol, canonical=True, isomericSmiles=False)
+            sma = Chem.MolToSmiles(mol, canonical=True, isomericSmiles=True)
             
             tokens = tokenizer.findall(sma)
             
@@ -202,7 +202,10 @@ def normalize_smiles(smi: str) -> str | None:
     
     except Exception:
         return None
-    
+
+def remove_isomers(smi: str) -> str | None:
+    return dm.to_smiles(dm.to_mol(smi), canonical=True, isomeric=False)
+
     
 def get_hac(smi: str) -> int:
     """Calculate Heavy Atom Count (HAC) from SMILES
@@ -305,6 +308,7 @@ def write_db_by_hac(db_id: str, pattern: list[str], output_folder: Path,
     "SMILES": "string",
     "db_id": "string",
     "HAC": "int64",
+    "nostereo_SMILES": "string",
     }
     
     group_id = db_id
@@ -319,15 +323,16 @@ def write_db_by_hac(db_id: str, pattern: list[str], output_folder: Path,
         print(f"⚠️ Skipping unsupported file type: {pattern}")
         raise NotImplementedError("File not supported")
         
-    ddf = ddf.dropna(subset=["SMILES"])
+    ddf = ddf.dropna(subset=["SMILES"]).drop_duplicates(subset=use_cols[0])
 
     # Normalize SMILES
-    ddf["canonical_SMILES"] = ddf.map_partitions(lambda df: df["SMILES"].map(normalize_smiles), meta=("SMILES", str))
-    ddf = ddf.dropna(subset=["canonical_SMILES"])
+    ddf["SMILES"] = ddf.map_partitions(lambda df: df["SMILES"].map(normalize_smiles), meta=("SMILES", str))
+    ddf = ddf.dropna(subset=["SMILES"])
     ddf["db_id"] = group_id
-    
+
+    ddf["nostereo_SMILES"] = ddf.map_partitions(lambda df: df["SMILES"].map(remove_isomers), meta=("nostereo_SMILES", str))
     # HAC calculation
-    ddf["HAC"] = ddf.map_partitions(lambda df: df["canonical_SMILES"].map(get_hac), meta=("HAC", int))
+    ddf["HAC"] = ddf.map_partitions(lambda df: df["nostereo_SMILES"].map(get_hac), meta=("HAC", int))
     ddf = ddf.astype(meta)
     # Write all partitions in parallel, grouped by HAC
     ddf.to_parquet(
