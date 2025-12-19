@@ -130,7 +130,7 @@ def main():
         # Batch size can match #workers if desired, but each DB is processed fully partitioned
         out_path = Path(output_folder)
         out_path.mkdir(parents=True, exist_ok=True)
-        progress = Path("progress_deduplicate.txt")
+        progress = out_path / Path("progress_deduplicate.txt")
         progress.touch(exist_ok=True)
         stats = out_path/"count_stats.txt"
         stats.touch(exist_ok=True)
