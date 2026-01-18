@@ -10,5 +10,6 @@
 "010": "CHIPMUNK_parquet/*.parquet",
 "011": "SCUBIDOO_parquet/*.parquet",
 "012": "SureChEMBL_parquet/*.parquet",
-"013": "MolPort_parquet/*.parquet"
+"013": "MolPort_parquet/*.parquet",
+"014": "WuXi_Galaxi_parquet/*.parquet"
 }

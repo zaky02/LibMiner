@@ -182,13 +182,13 @@ class RetrieveSmiles:
         return parquet_paths
 
     def retrieve_smiles(self,
+        db_con: duckdb.DuckDBPyConnection,
         indices: list[int],
         parquet_path: list[str],
         ) -> pd.DataFrame:
         """ 
         Retrieve the SMILES from the databases and convert them into Dataframes
         """
-        db_con = duckdb.connect()
         res = db_con.execute(f"ID, SELECT num_ID, nostereo_SMILES FROM read_parquet($path) WHERE num_ID IN $indices)", {"path": parquet_path, "indices": indices}).df()
         return res
 
@@ -213,8 +213,9 @@ class RetrieveSmiles:
             index.update(i)
             
         result = {}
-        # connect to database and search using the combined indices and parquet files   
-        res = self.retrieve_smiles(sorted(index), list(parquet))
+        # connect to database and search using the combined indices and parquet files
+        db_con = duckdb.connect()   
+        res = self.retrieve_smiles(db_con, sorted(index), list(parquet))
         for query, index in index_dict.items():
             dat = res[res["num_ID"].isin(index)]
             result[query] = pd.concat([dat, more_data[query]], axis=1) if more_data is not None else dat
@@ -235,16 +236,19 @@ class RetrieveSmiles:
 
 @dataclass
 class RetrieveIsomers:
+    """
+    Retrieve isomers for each query from the original database
+    """
     original_database: str
     
-    def retrieve_isomers(self, 
+    def retrieve_isomers(self,
+                         db_con: duckdb.DuckDBPyConnection, 
                          smiles_list: list[str],
                          parquet_path: str
                          ) -> dict[str, pd.DataFrame]:
         """
         Retrieve isomers for each query from the original database
         """
-        db_con = duckdb.connect()
         res = db_con.execute(f"SELECT ID, SMILES, nostereo_SMILES, db_id FROM read_parquet($path) WHERE nostereo_SMILES IN $smiles", {"path": parquet_path, "smiles": smiles_list}).df()
         return res
         
@@ -260,8 +264,8 @@ class RetrieveIsomers:
         smiles_list = list(smiles_lits)
         hacs = [dm.to_mol(smi).GetNumHeavyAtoms() for smi in smiles_list]
         parquet_paths = [f"{self.original_database}/HAC_{hac}/*.parquet" for hac in set(hacs)]
-        
-        res = self.retrieve_isomers(smiles_list, parquet_paths)
+        db_con = duckdb.connect()
+        res = self.retrieve_isomers(db_con, smiles_list, parquet_paths)
         result = {}
         for query, df in smiles_dict.items():
             isomers = res[res["nostereo_SMILES"].isin(df["nostereo_SMILES"])]

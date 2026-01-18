@@ -12,6 +12,7 @@ import datamol as dm
 import json
 import gc
 import re
+from functools import partial
 
 
 def parse_args():
@@ -142,7 +143,8 @@ def is_true_peptide(mol: Chem.Mol) -> bool:
     return False
 
 
-def normalize_smiles(smi: str) -> str | None:
+def normalize_smiles(smi: str, 
+                     check_isotopes: bool = False) -> str | None:
     """Normalize SMILES by:
     - Converting to canonical isomeric SMILES
     - Removing salts (keeping largest fragment)
@@ -152,6 +154,8 @@ def normalize_smiles(smi: str) -> str | None:
     ----------
     smi : str
         Input SMILES string
+    check_isotopes : bool
+        If True, molecules with isotopes are considered invalid
         
     Returns
     ------- 
@@ -166,7 +170,11 @@ def normalize_smiles(smi: str) -> str | None:
             mol = dm.to_mol(smi, ordered=True)
             if mol is None:
                 return None
-            
+            # filtrado por moleculas que contienen isotopos o metales
+            # demoemento Molport y surechemble seguro que tienen isotopos
+            if check_isotopes and any(atom.GetIsotope() != 0 for atom in mol.GetAtoms()):
+                return None
+
             mol = dm.fix_mol(mol, largest_only=True if "." in smi else False)
             
             mol = dm.standardize_mol(
@@ -178,7 +186,6 @@ def normalize_smiles(smi: str) -> str | None:
             stereo=False,
             )
             
-            # filtrado por moleculas que contienen isotopos o metales
             if is_true_peptide(mol): # skip true peptides
                 return None
             #poli ethylene glycol
@@ -204,9 +211,9 @@ def normalize_smiles(smi: str) -> str | None:
         return None
 
 def remove_isomers(smi: str) -> str | None:
-    return dm.to_smiles(dm.to_mol(smi), canonical=True, isomeric=False)
+    mol = Chem.MolFromSmiles(smi)
+    return dm.to_smiles(mol, canonical=True, isomeric=False) if mol else None
 
-    
 def get_hac(smi: str) -> int:
     """Calculate Heavy Atom Count (HAC) from SMILES
     
@@ -282,7 +289,8 @@ def split_csv_groups_by_size(
 
 
 def write_db_by_hac(db_id: str, pattern: list[str], output_folder: Path, 
-                    blocksize="64MB", use_cols: tuple[str] = ("ID", "SMILES")) -> None:
+                    blocksize="64MB", use_cols: tuple[str] = ("ID", "SMILES"),
+                    ignore_isotops=("001", "002", "003", "006", "011", "014")) -> None:
     """
     Normalize SMILES, deduplicate locally,
     split by HAC, and write to HAC-specific Parquet folders.
@@ -297,6 +305,10 @@ def write_db_by_hac(db_id: str, pattern: list[str], output_folder: Path,
         Output folder
     blocksize : str, optional 
         Dask block size
+    use_cols : tuple[str], optional
+        Columns to read from input files
+    ignore_isotops : tuple[str], optional
+        Database IDs to ignore isotope checks during normalization
         
     Returns
     -------
@@ -326,11 +338,13 @@ def write_db_by_hac(db_id: str, pattern: list[str], output_folder: Path,
     ddf = ddf.dropna(subset=["SMILES"]).drop_duplicates(subset=use_cols[0])
 
     # Normalize SMILES
-    ddf["SMILES"] = ddf.map_partitions(lambda df: df["SMILES"].map(normalize_smiles), meta=("SMILES", str))
+    normalize = partial(normalize_smiles, check_isotopes=(group_id not in ignore_isotops))
+    ddf["SMILES"] = ddf.map_partitions(lambda df: df["SMILES"].map(normalize), meta=("SMILES", str))
     ddf = ddf.dropna(subset=["SMILES"])
     ddf["db_id"] = group_id
 
     ddf["nostereo_SMILES"] = ddf.map_partitions(lambda df: df["SMILES"].map(remove_isomers), meta=("nostereo_SMILES", str))
+    ddf = ddf.dropna(subset=["nostereo_SMILES"])
     # HAC calculation
     ddf["HAC"] = ddf.map_partitions(lambda df: df["nostereo_SMILES"].map(get_hac), meta=("HAC", int))
     ddf = ddf.astype(meta)
