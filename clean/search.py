@@ -26,8 +26,11 @@ def parse_args():
     parser.add_argument('-mw', '--mw_range', nargs="+", type=int, help="The MW upper and/or the lower limit whn searching SMILES", default=None, required=False)
     parser.add_argument('-hac', '--hac_limits', nargs="+", type=int, help="The HAC upper and/or lower limit when searching SMILES", default=None, required=False)
     parser.add_argument("-st", "--search_type", required=False, default="similarity", choices=("similarity", "substructure"), help="The type of search to perform")
+    parser.add_argument("-ca", "--commercially_avaliable", action="store_true", help="Whether to only retrieve isomers from commercially avaliable databases", required=False)
+    parser.add_argument("-cd", "--commercial_databases", nargs="+", type=str, help="The commercial databases to retrieve isomers from if --commercially_avaliable is set", default=["enamine", "wuxi", "mcule", "molport"], required=False)
+    
     args = parser.parse_args()
-    return args.db_name, args.molecular_database, args.index_file, args.top_k, args.threshold, args.num_workers, args.output_file, args.query_path, args.on_disk, args.hac_limits, args.mw_range, args.search_type, args.original_database
+    return args.db_name, args.molecular_database, args.index_file, args.top_k, args.threshold, args.num_workers, args.output_file, args.query_path, args.on_disk, args.hac_limits, args.mw_range, args.search_type, args.original_database, args.commercially_avaliable, args.commercial_databases
 
 
 @dataclass
@@ -189,7 +192,7 @@ class RetrieveSmiles:
         """ 
         Retrieve the SMILES from the databases and convert them into Dataframes
         """
-        res = db_con.execute(f"ID, SELECT num_ID, nostereo_SMILES FROM read_parquet($path) WHERE num_ID IN $indices)", {"path": parquet_path, "indices": indices}).df()
+        res = db_con.execute(f"SELECT nostereo_SMILES, num_ID FROM read_parquet($path) WHERE num_ID IN $indices)", {"path": parquet_path, "indices": indices}).df()
         return res
 
     def batch_retrieve(
@@ -217,7 +220,7 @@ class RetrieveSmiles:
         db_con = duckdb.connect()   
         res = self.retrieve_smiles(db_con, sorted(index), list(parquet))
         for query, index in index_dict.items():
-            dat = res[res["num_ID"].isin(index)]
+            dat = res[res["num_ID"].isin(index)].drop(["num_ID"], axis=1)
             result[query] = pd.concat([dat, more_data[query]], axis=1) if more_data is not None else dat
         
         return result
@@ -240,6 +243,8 @@ class RetrieveIsomers:
     Retrieve isomers for each query from the original database
     """
     original_database: str
+    commercially_avaliable: bool = False
+    commercial_databases: Sequence[str] = ("enamine", "wuxi", "mcule", "molport")
     
     def retrieve_isomers(self,
                          db_con: duckdb.DuckDBPyConnection, 
@@ -249,10 +254,15 @@ class RetrieveIsomers:
         """
         Retrieve isomers for each query from the original database
         """
-        res = db_con.execute(f"SELECT ID, SMILES, nostereo_SMILES, db_id FROM read_parquet($path) WHERE nostereo_SMILES IN $smiles", {"path": parquet_path, "smiles": smiles_list}).df()
+        string = "SELECT ID, SMILES, nostereo_SMILES, db_id FROM read_parquet($path) WHERE nostereo_SMILES IN $smiles"
+        db_id = {"enamine": "001", "wuxi": "014", "mcule": "006", "molport": "013"}
+        if self.commercially_avaliable:
+            string = f"{string} AND db_id IN {tuple(db_id[name] for name in self.commercial_databases)}"
+            
+        res = db_con.execute(string, {"path": parquet_path, "smiles": smiles_list}).df()
         return res
-        
-    def bacth_retrieve_isomers(self,
+
+    def batch_retrieve_isomers(self,
                                 smiles_dict: dict[str, pd.DataFrame],
                                 ) -> dict[str, pd.DataFrame]:
         """
@@ -268,13 +278,13 @@ class RetrieveIsomers:
         res = self.retrieve_isomers(db_con, smiles_list, parquet_paths)
         result = {}
         for query, df in smiles_dict.items():
-            isomers = res[res["nostereo_SMILES"].isin(df["nostereo_SMILES"])]
-            result[query] = isomers.drop(["nostereo_SMILES"], axis=1)
+            isomers = res[res["nostereo_SMILES"].isin(df["nostereo_SMILES"])].drop(["nostereo_SMILES"], axis=1)
+            result[query] = isomers
         
         return result
 
 def main():
-    db_name, molecular_database, index_file, top_k, threshold, num_workers, output_file, query_path, on_disk,hac_limits, mw_range, search_type, original_database = parse_args()
+    db_name, molecular_database, index_file, top_k, threshold, num_workers, output_file, query_path, on_disk,hac_limits, mw_range, search_type, original_database, commercially_avaliable, commercial_databases = parse_args()
    
     with open(query_path) as w:
         query = [x.strip() for x in w.readlines()]
@@ -288,8 +298,8 @@ def main():
     smiles = retrieve.run(search_results, more_data=tanimoto)
     if search_type == "substructure":
         smiles = fp.match_substructure(smiles)
-    retriever_isomers = RetrieveIsomers(original_database=original_database)
-    smiles = retriever_isomers.bacth_retrieve_isomers(smiles)
+    retriever_isomers = RetrieveIsomers(original_database, commercially_avaliable, commercial_databases)
+    smiles = retriever_isomers.batch_retrieve_isomers(smiles)
     Path(output_file).parents.mkdir(parents=True, exist_ok=True)
     pd.concat(smiles).to_csv(output_file)
     
