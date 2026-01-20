@@ -1,3 +1,16 @@
+""" A script to deduplicate SMILES in a molecular database using Dask.
+It is used 2 times during the creation of the database -> the first time is on the SMILES column.
+You can use the default options
+
+For the second time you have to change the following options:
+- --use_cols nostereo_SMILES
+- --drop_cols nostereo_SMILES
+- --assign_ids (to set it to true)
+- --meta '{"nostereo_SMILES": "string", "num_ID": "int64"}'
+- --input_path to the output_path of the first deduplication, if default would be 'Molecular_database/deduplicated'
+- --output_path to a different folder, for example 'Molecular_database/deduplicated_nostereo'
+
+"""
 from pathlib import Path
 import os
 import time
@@ -12,18 +25,24 @@ import json
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Deduplicate SMILES')
-    parser.add_argument('-bs', '--blocksize', type=str, help='Block size for dask dataframe. The safest is the default 64 MB',  required=False, default='64MB')
+    parser.add_argument('-bs', '--blocksize', type=str, 
+                        help='Block size for dask dataframe. The safest is the default 64 MB',  
+                        required=False, default='64MB')
     parser.add_argument('-o','--output_path', type=str, help='Output folder for the deduplicated database', required=False, default='Molecular_database/deduplicated')
     parser.add_argument('-i','--input_path', type=str, help='Input folder where the database is', required=False,
                         default='Molecular_database')
-    parser.add_argument('-s', '--repartition_size', type=int, help='The number of rows for each partition and file', required=False, default=10_000_000)
+    parser.add_argument('-s', '--repartition_size', type=int, 
+                        help='The number of rows for each partition and file', 
+                        required=False, default=10_000_000)
     parser.add_argument("-c", "--use_cols", nargs="+", help="Columns to read", required=False, 
-                        default=['ID', "SMILES"])
-    parser.add_argument("-d", "--drop_cols", type=str, help="Column to drop", required=False, 
+                        default=["ID", "SMILES", "nostereo_SMILES", "db_id"])
+    parser.add_argument("-d", "--drop_cols", type=str, help="Column to drop the duplicate", required=False, 
                         default='SMILES')
     parser.add_argument('-a','--assign_ids', action='store_true', help='Whether to assign unique numerical IDs', required=False, default=False)
-    parser.add_argument('-m','--meta', type=json.loads, help='Metadata dictionary for dask dataframe', required=False, 
-                        default={"ID": "string", "SMILES": "string", "db_id": "string", "nostereo_SMILES": "string"})
+    parser.add_argument('-m','--meta', type=json.loads, 
+                        help='Metadata dictionary for dask dataframe from a json string', required=False, 
+                        default={"ID": "string", "SMILES": "string", "db_id": "string", 
+                                 "nostereo_SMILES": "string"})
     args = parser.parse_args()
     return args.blocksize, args.output_path, args.repartition_size, args.use_cols, args.input_path, args.drop_cols, args.assign_ids, args.meta
 
@@ -68,7 +87,8 @@ def deduplicator(hac_folders: Path | str,
                  current_offset: int = 0, 
                  drop: str="SMILES",
                  assign_ids: bool=False,
-                 meta: dict = {"ID": "string", "SMILES": "string", "db_id": "string", "nostereo_SMILES": "string"}) -> int:
+                 meta: dict = {"ID": "string", "SMILES": "string", 
+                               "db_id": "string", "nostereo_SMILES": "string"}) -> int:
     
     """
     Deduplicate, assign unique numerical IDs and write to HAC-specific Parquet folders.

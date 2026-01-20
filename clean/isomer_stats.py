@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 def compute_internal_duplication(
     db_paths: dict[str, str],
-    smiles_cols: str = "canonical_SMILES",
+    smiles_cols: str = "nostereo_SMILES",
     block_size: str = "64MB",
     batch_size: int = 2,
 ):
