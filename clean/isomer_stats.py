@@ -15,7 +15,7 @@ def parse_args():
     parser.add_argument('-bs', '--blocksize', type=str, help='Block size for dask dataframe. The safest is the default 64MB',  required=False, default='64MB')
     parser.add_argument('-dp','--database_path', type=str, help='The folder path for the database', required=False,
                         default='Molecular_database')
-    parser.add_argument('-n','--nostereo', type=str, help='The column name of the canonical smiles', required=False,
+    parser.add_argument('-n','--nostereo', type=str, help='The column name of the non stereo smiles', required=False,
                         default='nostereo_SMILES')
     
     args = parser.parse_args()
@@ -52,7 +52,7 @@ def compute_internal_duplication(
 
         # Build each batch of Dask operations
         for db_id, path in batch:
-            df = dd.read_parquet(path, columns=smiles_cols, blocksize=block_size)
+            df = dd.read_parquet(path, columns=[smiles_cols], blocksize=block_size)
             # El drop ID nunca debe hacerse en el pairwise
             df_dedup = df.drop_duplicates(subset=smiles_cols)
             unique = df_dedup.map_partitions(len).sum()
@@ -77,7 +77,7 @@ def get_overlap_by_merge(db1: str, db2: str,
     shuffle_method = "disk" if on_disk else "tasks"
     overlap = dd.merge(df1, df2, on=smiles_col, how="inner", shuffle_method=shuffle_method)
     
-    return overlap.map_partitions(len).sum() # Returns a Dask DataFrame, not computed!
+    return overlap.map_partitions(len).sum() # Returns a lazy Dask scalar (not computed)
 
 
 def get_pairwise_overlaps(
@@ -89,10 +89,16 @@ def get_pairwise_overlaps(
     overlaps={}
     pairs = [sorted(x) for x in combinations(dedup_dfs.keys(), 2)]
     for db1, db2 in pairs:  # run n bacthes at a time
-        overlap = get_overlap_by_merge(db1, db2, dedup_dfs, smiles_col, on_disk)
-        overlaps[f"{db1}_{db2}"] = overlap
+        overlaps[f"{db1}_{db2}"] = get_overlap_by_merge(db1, db2, dedup_dfs, smiles_col, on_disk)
     
-    return pd.Series(overlaps, name="after_pairswise_deduplication")
+    # Compute all overlaps at once
+    computed = dd.compute(*overlaps.values())
+
+    return pd.Series(
+        computed,
+        index=overlaps.keys(),
+        name="after_pairswise_deduplication"
+    )
 
 
 def main():
@@ -101,7 +107,7 @@ def main():
     with performance_report(filename="dask-isomer.html"):
         # Batch size can match #workers if desired, but each DB is processed fully partitioned
         database_path = Path(database_path)
-        output_stats = database_path/"isomer_duplicates"
+        output_stats = database_path/"isomer_stats"
         progress = Path("progress_isomers.txt")
         progress.touch(exist_ok=True)
         hacs = sorted(database_path.glob("HAC_*"), key=lambda x: int(x.name.split("_")[-1]))

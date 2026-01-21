@@ -38,7 +38,7 @@ def parse_args():
                         default=["ID", "SMILES", "nostereo_SMILES", "db_id"])
     parser.add_argument("-d", "--drop_cols", type=str, help="Column to drop the duplicate", required=False, 
                         default='SMILES')
-    parser.add_argument('-a','--assign_ids', action='store_true', help='Whether to assign unique numerical IDs', required=False, default=False)
+    parser.add_argument('-a','--assign_ids', action='store_true', help='Whether to assign unique numerical IDs', required=False)
     parser.add_argument('-m','--meta', type=json.loads, 
                         help='Metadata dictionary for dask dataframe from a json string', required=False, 
                         default={"ID": "string", "SMILES": "string", "db_id": "string", 

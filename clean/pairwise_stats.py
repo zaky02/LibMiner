@@ -175,7 +175,7 @@ def main():
     with performance_report(filename="dask-pairwise.html"):
         # Batch size can match #workers if desired, but each DB is processed fully partitioned
         database_path = Path(database_path)
-        output_stats = database_path/"pairwise"
+        output_stats = database_path/"pairwise_stats"
         progress = Path("progress_pairwise.txt")
         progress.touch(exist_ok=True)
         hacs = sorted(database_path.glob("HAC_*"), key=lambda x: int(x.name.split("_")[-1]))
