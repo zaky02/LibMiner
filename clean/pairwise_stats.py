@@ -199,7 +199,7 @@ def main():
             (output_stats/hac).mkdir(parents=True, exist_ok=True)
             out_parq = output_stats / hac / out_parquet 
             logger.info(f"counting stats {hac}")
-            sta = compute_count(hac_folders, block_size)
+            sta = compute_count(hac_folders, smiles_col, block_size)
             
             classified_folders = convert_folder(hac_folders)
             logger.info(f"computing internal stats {hac}")

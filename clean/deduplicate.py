@@ -28,7 +28,7 @@ def parse_args():
     parser.add_argument('-bs', '--blocksize', type=str, 
                         help='Block size for dask dataframe. The safest is the default 64 MB',  
                         required=False, default='64MB')
-    parser.add_argument('-o','--output_path', type=str, help='Output folder for the deduplicated database', required=False, default='Molecular_database/deduplicated')
+    parser.add_argument('-o','--output_path', type=str, help='Output folder for the deduplicated database', required=False, default='Molecular_database/deduplicate_canonical')
     parser.add_argument('-i','--input_path', type=str, help='Input folder where the database is', required=False,
                         default='Molecular_database')
     parser.add_argument('-s', '--repartition_size', type=int, 
@@ -140,7 +140,7 @@ def deduplicator(hac_folders: Path | str,
 # -------------------------
 
 def main():
-    block_size, output_folder, repartition_size, use_cols, input_path, drop_cols, assign_ids, meta = parse_args()
+    block_size, output_folder, repartition_size, use_cols, input_path, drop_cols, if_assign_ids, meta = parse_args()
     
     start = time.perf_counter()
     
@@ -170,7 +170,7 @@ def main():
             count = deduplicator(hac_folders, out_path, 
                                  block_size, repartition_size, 
                                  use_cols, current_offset, drop_cols,
-                                 assign_ids, meta)
+                                 if_assign_ids, meta)
             
             current_offset = current_offset + count
             
