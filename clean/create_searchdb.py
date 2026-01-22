@@ -32,7 +32,7 @@ def parse_args():
 
 
 @ray.remote
-def convert_parquet_to_smi_chunk_3(parquet_path, out_dir, smiles_col="SMILES", id_col="ID", 
+def convert_parquet_to_smi_chunk(parquet_path, out_dir, smiles_col="SMILES", id_col="ID", 
                                  batch_size=100_000):
     """
     Convert a single Parquet file to a temporary .smi chunk file.
@@ -87,6 +87,16 @@ def ray_parquet_to_smi(parquet_files: list[str | Path],
     # Shutdown Ray when done (optional if you’ll reuse the cluster)
     ray.shutdown()
     
+    
+def sort_function(x: Path) -> tuple[int, int]:
+    """Sort function for sorting Parquet files."""
+    parts = x.name.split('_')
+    hac_part = parts[0]
+    db_part = parts[1]
+    hac_value = int(hac_part.replace('HAC', '').replace('wrongHAC', '0'))
+    db_value = int(db_part.replace('db', ''))
+    return (hac_value, db_value)
+
 
 def main():
     
@@ -96,8 +106,8 @@ def main():
     start = time.perf_counter()
     ray.init(ignore_reinit_error=True, log_to_driver=False)
     # Batch size can match #workers if desired, but each DB is processed fully partitioned
-    input_path = Path(input_folder) / "cleaned"
-    parquet_files = input_path.glob("HAC_*/*.parquet")
+    input_path = Path(input_folder)
+    parquet_files = sorted(input_path.glob("HAC_*/*.parquet"), key=sort_function)
     ray_parquet_to_smi(parquet_files, output_smi, batch_size=batch_size)
     
     Path(output_hdf).parent.mkdir(parents=True, exist_ok=True)
