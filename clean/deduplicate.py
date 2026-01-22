@@ -86,7 +86,7 @@ def deduplicator(hac_folders: Path | str,
                  use_cols: tuple[str] = ("ID", "SMILES", "nostereo_SMILES", "db_id"), 
                  current_offset: int = 0, 
                  drop: str="SMILES",
-                 assign_ids: bool=False,
+                 if_assign_ids: bool=False,
                  meta: dict = {"ID": "string", "SMILES": "string", 
                                "db_id": "string", "nostereo_SMILES": "string"}) -> int:
     
@@ -113,7 +113,7 @@ def deduplicator(hac_folders: Path | str,
     
     partition_offsets = np.insert(np.cumsum(partition_lengths[:-1]), 0, 0)
     # Assign unique IDs within Dask graph (no Python loop)
-    if assign_ids:
+    if if_assign_ids:
         ddf_merged = assign_ids(ddf_merged, partition_offsets, current_offset, meta)
     
     n = max(1, int(count / repartition_size))

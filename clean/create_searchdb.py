@@ -7,6 +7,8 @@ import pyarrow.parquet as pq
 from FPSim2.scripts.create_fpsim2_fp_db import create_db_file_parallel
 import ray
 import json
+import pyarrow.compute as pc
+import pyarrow as pa
 
 
 def parse_args():
@@ -30,11 +32,8 @@ def parse_args():
 
 
 @ray.remote
-def convert_parquet_to_smi_chunk(parquet_path: str | Path, 
-                                 out_dir: str | Path, 
-                                 smiles_col: str="nostereo_SMILES", 
-                                 id_col: str="num_ID", 
-                                 batch_size: int=100_000):
+def convert_parquet_to_smi_chunk_3(parquet_path, out_dir, smiles_col="SMILES", id_col="ID", 
+                                 batch_size=100_000):
     """
     Convert a single Parquet file to a temporary .smi chunk file.
     Executed as a Ray task.
@@ -42,23 +41,14 @@ def convert_parquet_to_smi_chunk(parquet_path: str | Path,
     parquet_file = pq.ParquetFile(parquet_path)
     smi_temp = Path(out_dir) / (Path(parquet_path).stem + ".smi")
 
-    buffer = []
     with open(smi_temp, "w", encoding="utf-8") as f:
         for batch in parquet_file.iter_batches(columns=[smiles_col, id_col], batch_size=batch_size):
-            df = batch.to_pandas()
-            lines = [f"{row[smiles_col]} {(row[id_col])}\n" for _, row in df.iterrows()]
-            buffer.extend(lines)
-
-            # Flush periodically to keep memory small
-            if len(buffer) >= 1_500_000:
-                f.writelines(buffer)
-                buffer.clear()
-
-        if buffer:
-            f.writelines(buffer)
-
+            smiles = batch.column(smiles_col)
+            ids = batch.column(id_col).cast(pa.string())
+            lines = pc.binary_join_element_wise(smiles, ids, "\n", " ")
+            f.writelines(lines.to_pylist())
+            
     return str(smi_temp)
-
 
 def ray_parquet_to_smi(parquet_files: list[str | Path], 
                        out_smi: str | Path, 
