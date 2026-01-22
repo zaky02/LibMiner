@@ -4,18 +4,19 @@ import argparse
 import duckdb
 import pandas as pd
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Sequence
 from utils import convert_hac_to_mw, convert_mw_to_hac
 from functools import partial
 import datamol as dm
+import json
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Search similar SMILES')
     parser.add_argument('-db', '--db_name', type=str, help='the name of the FPSIM2 fingerprint database',  required=True)
-    parser.add_argument('-m','--molecular_database', type=str, help='The folder path for the analogous search database', required=True, default='Molecular_database/no_stereo')
-    parser.add_argument('-ms','--original_database', type=str, help='The folder path for the original database', required=True, default='Molecular_database/deduplicated')
+    parser.add_argument('-m','--molecular_database', type=str, help='The folder path for the analogous search database', required=True, default='Molecular_database/deduplicate_nostereo')
+    parser.add_argument('-ms','--original_database', type=str, help='The folder path for the original database', required=True, default='Molecular_database/deduplicate_canonical')
     parser.add_argument('-q','--query_path', type=str, help='File for the query in .smi format', required=True)
     parser.add_argument('-k','--top_k', type=int, help='How many molecular to retrieve (it might return less because of the algorithm)', required=False, default=500)
     parser.add_argument('-t','--threshold', type=float, help='The similarity threshold, faster when higher but it might return less molecules than specified', required=False, default=0.7)
@@ -28,9 +29,13 @@ def parse_args():
     parser.add_argument("-st", "--search_type", required=False, default="similarity", choices=("similarity", "substructure"), help="The type of search to perform")
     parser.add_argument("-ca", "--commercially_avaliable", action="store_true", help="Whether to only retrieve isomers from commercially avaliable databases", required=False)
     parser.add_argument("-cd", "--commercial_databases", nargs="+", type=str, help="The commercial databases to retrieve isomers from if --commercially_avaliable is set", default=["enamine", "wuxi", "mcule", "molport"], required=False)
+    parser.add_argument('-p','--pairwise_database', type=str, help='The folder path for the pairwise database', required=False, default='Molecular_database/pairwise_stats')
+    parser.add_argument('-db', '--db_id', type=json.loads, 
+                        help='Dictionary mapping commercial database names to their IDs', required=False, 
+                        default={"enamine": "001", "wuxi": "014", "mcule": "006", "molport": "013"})
     
     args = parser.parse_args()
-    return args.db_name, args.molecular_database, args.index_file, args.top_k, args.threshold, args.num_workers, args.output_file, args.query_path, args.on_disk, args.hac_limits, args.mw_range, args.search_type, args.original_database, args.commercially_avaliable, args.commercial_databases
+    return args.db_name, args.molecular_database, args.index_file, args.top_k, args.threshold, args.num_workers, args.output_file, args.query_path, args.on_disk, args.hac_limits, args.mw_range, args.search_type, args.original_database, args.commercially_avaliable, args.commercial_databases, args.pairwise_database, args.db_id
 
 
 @dataclass
@@ -192,7 +197,7 @@ class RetrieveSmiles:
         """ 
         Retrieve the SMILES from the databases and convert them into Dataframes
         """
-        res = db_con.execute(f"SELECT nostereo_SMILES, num_ID FROM read_parquet($path) WHERE num_ID IN $indices)", {"path": parquet_path, "indices": indices}).df()
+        res = db_con.execute("SELECT nostereo_SMILES, num_ID FROM read_parquet($path) WHERE num_ID IN $indices;", {"path": parquet_path, "indices": indices}).df()
         return res
 
     def batch_retrieve(
@@ -222,7 +227,8 @@ class RetrieveSmiles:
         for query, index in index_dict.items():
             dat = res[res["num_ID"].isin(index)].drop(["num_ID"], axis=1)
             result[query] = pd.concat([dat, more_data[query]], axis=1) if more_data is not None else dat
-        
+            
+        db_con.close()
         return result
     
     def run(self, 
@@ -237,54 +243,210 @@ class RetrieveSmiles:
         smiles = self.batch_retrieve(search_results, parquet_paths, more_data)
         return smiles
 
-@dataclass
-class RetrieveIsomers:
-    """
-    Retrieve isomers for each query from the original database
-    """
-    original_database: str
-    commercially_avaliable: bool = False
-    commercial_databases: Sequence[str] = ("enamine", "wuxi", "mcule", "molport")
-    
-    def retrieve_isomers(self,
-                         db_con: duckdb.DuckDBPyConnection, 
-                         smiles_list: list[str],
-                         parquet_path: str
-                         ) -> dict[str, pd.DataFrame]:
-        """
-        Retrieve isomers for each query from the original database
-        """
-        string = "SELECT ID, SMILES, nostereo_SMILES, db_id FROM read_parquet($path) WHERE nostereo_SMILES IN $smiles"
-        db_id = {"enamine": "001", "wuxi": "014", "mcule": "006", "molport": "013"}
-        if self.commercially_avaliable:
-            string = f"{string} AND db_id IN {tuple(db_id[name] for name in self.commercial_databases)}"
-            
-        res = db_con.execute(string, {"path": parquet_path, "smiles": smiles_list}).df()
-        return res
 
-    def batch_retrieve_isomers(self,
-                                smiles_dict: dict[str, pd.DataFrame],
-                                ) -> dict[str, pd.DataFrame]:
+@dataclass
+class IsomerRetriever:
+    """
+    Retrieve isomers from the original database and optionally
+    filter by commercial availability.
+    """
+
+    original_database: str
+    pairwise_database: str | None = None
+
+    commercially_available: bool = False
+    commercial_databases: Sequence[str] = ("enamine", "wuxi", "mcule", "molport")
+
+    db_id: dict[str, str] = field(default_factory=lambda: {
+        "enamine": "001",
+        "wuxi": "014",
+        "mcule": "006",
+        "molport": "013",
+    })
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+    @property
+    def commercial_db_codes(self) -> tuple[str, ...]:
+        return tuple(self.db_id[name] for name in self.commercial_databases)
+    
+    
+    def retrieve_batch(
+        self,
+        queries: dict[str, pd.DataFrame],
+    ) -> dict[str, pd.DataFrame]:
         """
-        Batch retrieve isomers for each query from the original database
+        Main entry point: retrieve isomers for each query.
         """
-        smiles_lits = set()
-        df = pd.concat(smiles_dict.values())
-        smiles_list.update(df["nostereo_SMILES"].tolist())
-        smiles_list = list(smiles_lits)
-        hacs = [dm.to_mol(smi).GetNumHeavyAtoms() for smi in smiles_list]
-        parquet_paths = [f"{self.original_database}/HAC_{hac}/*.parquet" for hac in set(hacs)]
         db_con = duckdb.connect()
-        res = self.retrieve_isomers(db_con, smiles_list, parquet_paths)
+
+        try:
+            nostereo_smiles = list(set(pd.concat(queries.values(), axis=0)["nostereo_SMILES"].to_list()))
+            parquet_paths = self._original_parquet_paths(nostereo_smiles)
+
+            all_isomers = self._query_original_database(
+                db_con,
+                nostereo_smiles,
+                parquet_paths,
+            )
+
+            if self.commercially_available:
+                all_isomers = self._filter_commercial_isomers(
+                    db_con,
+                    all_isomers,
+                )
+
+            return self._group_isomers_by_query(queries, all_isomers)
+
+        finally:
+            db_con.close()
+
+    # ------------------------------------------------------------------
+    # DuckDB queries
+    # ------------------------------------------------------------------
+
+    def _query_original_database(
+        self,
+        db_con: duckdb.DuckDBPyConnection,
+        nostereo_smiles: list[str],
+        parquet_paths: list[str],
+    ) -> pd.DataFrame:
+        """
+        Retrieve all isomers from the original database with the nostereo_SMILES.
+        """
+        query = """
+        SELECT
+            ID,
+            SMILES,
+            nostereo_SMILES,
+            db_id
+        FROM read_parquet($path)
+        WHERE nostereo_SMILES IN $smiles;
+        """
+
+        return db_con.execute(query, {"path": parquet_paths, "smiles": nostereo_smiles}).df()
+
+    def _query_pairwise_database(
+        self,
+        db_con: duckdb.DuckDBPyConnection,
+        smiles: list[str],
+        parquet_paths: list[str],
+    ) -> pd.DataFrame:
+        """
+        Retrieve SMILES that appear in any commercial database
+        according to the pairwise database.
+        """
+        query = """
+        SELECT SMILES
+        FROM read_parquet($path)
+        WHERE
+            SMILES IN $smiles
+            AND len(list_intersect(
+                    string_split(Databases, ','),
+                    $db_codes
+                )
+            ) > 0;
+        """
+
+        return db_con.execute(query, {"path": parquet_paths, 
+                                      "smiles": smiles, 
+                                      "db_codes": self.commercial_db_codes}).df()
+
+    # ------------------------------------------------------------------
+    # Commercial filtering logic
+    # ------------------------------------------------------------------
+
+    def _filter_commercial_isomers(
+        self,
+        db_con: duckdb.DuckDBPyConnection,
+        isomers: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """
+        Keep:
+        - isomers directly from commercial databases
+        - non-commercial isomers that have duplicates in commercial DBs
+        """
+
+        commercial = isomers[isomers["db_id"].isin(self.commercial_db_codes)]
+        non_commercial = isomers[~isomers["db_id"].isin(self.commercial_db_codes)]
+
+        if non_commercial.empty:
+            return commercial
+
+        duplicated_non_commercial = self._find_duplicates_in_commercial_dbs(
+            db_con,
+            non_commercial,
+        )
+
+        return pd.concat([commercial, duplicated_non_commercial], axis=0)
+
+    def _find_duplicates_in_commercial_dbs(
+        self,
+        db_con: duckdb.DuckDBPyConnection,
+        non_commercial: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """
+        From non-commercial isomers, keep those that exist in
+        commercial databases according to the pairwise DB.
+        """
+        smiles = non_commercial["SMILES"].tolist()
+        hacs = self._compute_hacs(smiles)
+
+        parquet_paths = [
+            f"{self.pairwise_database}/{hac}/*.parquet"
+            for hac in set(hacs)
+        ]
+
+        pairwise_hits = self._query_pairwise_database(
+            db_con,
+            smiles,
+            parquet_paths,
+        )
+
+        return non_commercial[
+            non_commercial["SMILES"].isin(pairwise_hits["SMILES"])
+        ]
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _original_parquet_paths(self, smiles: list[str]) -> list[str]:
+        hacs = self._compute_hacs(smiles)
+        return [
+            f"{self.original_database}/HAC_{hac}/*.parquet"
+            for hac in set(hacs)
+        ]
+
+    def _compute_hacs(self, smiles: list[str]) -> list[int]:
+        return [
+            dm.to_mol(smi).GetNumHeavyAtoms()
+            for smi in smiles
+        ]
+
+    def _group_isomers_by_query(
+        self,
+        queries: dict[str, pd.DataFrame],
+        all_isomers: pd.DataFrame,
+    ) -> dict[str, pd.DataFrame]:
+        """
+        Return isomers grouped per original query.
+        """
         result = {}
-        for query, df in smiles_dict.items():
-            isomers = res[res["nostereo_SMILES"].isin(df["nostereo_SMILES"])].drop(["nostereo_SMILES"], axis=1)
-            result[query] = isomers
-        
+
+        for query, df in queries.items():
+            subset = all_isomers[
+                all_isomers["nostereo_SMILES"].isin(df["nostereo_SMILES"])
+            ].drop(columns=["nostereo_SMILES"])
+
+            result[query] = subset
+
         return result
 
+
 def main():
-    db_name, molecular_database, index_file, top_k, threshold, num_workers, output_file, query_path, on_disk,hac_limits, mw_range, search_type, original_database, commercially_avaliable, commercial_databases = parse_args()
+    db_name, molecular_database, index_file, top_k, threshold, num_workers, output_file, query_path, on_disk,hac_limits, mw_range, search_type, original_database, commercially_avaliable, commercial_databases, pairwise_database, db_id = parse_args()
    
     with open(query_path) as w:
         query = [x.strip() for x in w.readlines()]
@@ -298,8 +460,9 @@ def main():
     smiles = retrieve.run(search_results, more_data=tanimoto)
     if search_type == "substructure":
         smiles = fp.match_substructure(smiles)
-    retriever_isomers = RetrieveIsomers(original_database, commercially_avaliable, commercial_databases)
-    smiles = retriever_isomers.batch_retrieve_isomers(smiles)
+    retrieve_isomers = IsomerRetriever(original_database, pairwise_database, commercially_avaliable, commercial_databases, db_id)
+    
+    smiles = retrieve_isomers.retrieve_batch(smiles)
     Path(output_file).parents.mkdir(parents=True, exist_ok=True)
     pd.concat(smiles).to_csv(output_file)
     
