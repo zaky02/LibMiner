@@ -1,3 +1,4 @@
+import gc
 import dask.dataframe as dd
 from dask.distributed import Client, performance_report
 import os
@@ -7,6 +8,7 @@ import dask
 import pandas as pd
 import logging
 from utils import convert_folder
+from typing import Sequence
 from itertools import combinations
 
 
@@ -19,10 +21,11 @@ def parse_args():
                         default='Molecular_database')
     parser.add_argument('-n','--nostereo', type=str, help='The column name of the non stereo smiles', required=False,
                         default='nostereo_SMILES')
+    parser.add_argument("-ld", "--large_dbs", nargs='*', default=["001", "002", "014", "003"],
+                        help="List of database IDs considered large for on-disk processing.")
     
     args = parser.parse_args()
-    return args.blocksize, args.database_path, args.nostereo, args.output_path
-
+    return args.blocksize, args.database_path, args.nostereo, args.output_path, args.large_dbs
 
 scheduler_address = os.environ["DASK_SCHEDULER_ADDRESS"]
 client = Client(scheduler_address)    # Connect to that cluster
@@ -42,7 +45,6 @@ def compute_internal_duplication(
     Compute internal deduplication statistics for many databases in smaller batches.
     Returns a pandas Series of unique counts and a dict of deduplicated Dask DataFrames.
     """
-    dedup_dfs = {}
     counts = {}
 
     # Convert items to a list so we can slice batches
@@ -58,41 +60,48 @@ def compute_internal_duplication(
             # El drop ID nunca debe hacerse en el pairwise
             df_dedup = df.drop_duplicates(subset=smiles_cols)
             unique = df_dedup.map_partitions(len).sum()
-            dedup_dfs[db_id] = df_dedup
             lazy_results.append(unique)
 
         # Compute this batch in one go
         computed_values = dask.compute(*lazy_results)
         counts.update(dict(zip([db_id for db_id, _ in batch], computed_values)))
 
-    return pd.Series(counts, name="after_internal_deduplication"), dedup_dfs
+    return pd.Series(counts, name="after_internal_deduplication")
 
 
 def get_overlap_by_merge(db1: str, db2: str, 
-                        dedup_dfs: dict[str, dd.DataFrame], 
-                        smiles_col: str ="nostereo_SMILES", 
+                        db_paths: dict[str, str], 
+                        smiles_col: str ="nostereo_SMILES",
+                        block_size: str = "64MB",
+                        large_dbs: Sequence[str] = ("001", "002", "014", "003"),
                         on_disk: bool=False):
 
-    df1 = dedup_dfs[db1]
-    df2 = dedup_dfs[db2]
+    df1 = dd.read_parquet(db_paths[db1], columns=[smiles_col], blocksize=block_size).drop_duplicates(subset=smiles_col)
+    df2 = dd.read_parquet(db_paths[db2], columns=[smiles_col], blocksize=block_size).drop_duplicates(subset=smiles_col)
 
-    shuffle_method = "disk" if on_disk else "tasks"
+    shuffle_method = "disk" if on_disk and (db1 in large_dbs or db2 in large_dbs) else "tasks"
     overlap = dd.merge(df1, df2, on=smiles_col, how="inner", shuffle_method=shuffle_method)
+    over = overlap.map_partitions(len).sum().compute()
     
-    return overlap.map_partitions(len).sum() # Returns a lazy Dask scalar (not computed)
+    del df1, df2
+    client.run(gc.collect)
+    
+    return over
 
 
 def get_pairwise_overlaps(
-    dedup_dfs: dict[str, dd.DataFrame],
+    db_paths: dict[str, str],
     smiles_col: str ="nostereo_SMILES",
+    block_size: str = "64MB",
+    large_dbs: Sequence[str] = ("001", "002", "014", "003"),
     on_disk: bool=False
     ):
     
     overlaps={}
-    pairs = [sorted(x) for x in combinations(dedup_dfs.keys(), 2)]
+    pairs = [sorted(x) for x in combinations(db_paths.keys(), 2)]
     for db1, db2 in pairs:  # run n bacthes at a time
-        over = get_overlap_by_merge(db1, db2, dedup_dfs, smiles_col, on_disk)
-        overlaps[f"{db1}_{db2}"] = over.compute()
+        over = get_overlap_by_merge(db1, db2, db_paths, smiles_col, block_size, large_dbs, on_disk)
+        overlaps[f"{db1}_{db2}"] = over
 
     return pd.Series(
         list(overlaps.values()),
@@ -102,7 +111,7 @@ def get_pairwise_overlaps(
 
 
 def main():
-    block_size, database_path, smiles_col, output_path = parse_args()
+    block_size, database_path, smiles_col, output_path, large_dbs = parse_args()
     
     with performance_report(filename="dask-isomer.html"):
         # Batch size can match #workers if desired, but each DB is processed fully partitioned
@@ -134,13 +143,11 @@ def main():
             
             classified_folders = convert_folder(hac_folders)
             logger.info(f"computing internal stats {hac}")
-            internal_counts, dedup_dfs = compute_internal_duplication(classified_folders, smiles_col, block_size, 
+            internal_counts = compute_internal_duplication(classified_folders, smiles_col, block_size, 
                                                                       batch_size)
             
             logger.info(f"computing database redundancy {hac}")
-            overlaps = get_pairwise_overlaps(dedup_dfs, smiles_col, on_disk)
-            dedup_dfs.clear()
-
+            overlaps = get_pairwise_overlaps(classified_folders, smiles_col,block_size, large_dbs, on_disk)
             internal_counts.to_csv(output_stats/hac/"internal_duplication.csv")
             overlaps.to_csv(output_stats/hac/"pairwise_duplication.csv")
 
