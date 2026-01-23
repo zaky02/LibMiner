@@ -20,20 +20,22 @@ def parse_args():
     parser.add_argument('-b','--batch_size', type=int, help='bacth size', required=False,
                         default=100_000)
     parser.add_argument('-fp','--fp_parm', type=json.loads, help='Fingerprint params', required=False,
-                        default='{"radius": 2, "fpSize": 1024}')
-    parser.add_argument('-ft','--fp_type', type=int, help='Fingerprint type supported by FPSim2', required=False,
+                        default={"radius": 2, "fpSize": 1024})
+    parser.add_argument('-ft','--fp_type', type=str, help='Fingerprint type supported by FPSim2', required=False,
                         default="Morgan")
     parser.add_argument('-oh', '--output_hdf', type=str, help='The output .h5 filename', 
                         required=False, default='fp_db.h5')
     parser.add_argument("-c", "--cpus", type=int, help="number of processors to run the create_db_file_parallel",
                         default=4)
     args = parser.parse_args()
-    return args.input_path, args.output_smi, args.batch_size, args.fp_size, args.output_hdf, args.cpus, args.fp_type
+    return args.input_path, args.output_smi, args.batch_size, args.fp_parm, args.output_hdf, args.cpus, args.fp_type
 
 
 @ray.remote
-def convert_parquet_to_smi_chunk(parquet_path, out_dir, smiles_col="SMILES", id_col="ID", 
-                                 batch_size=100_000):
+def convert_parquet_to_smi_chunk(parquet_path: str | Path, out_dir: str | Path, 
+                                 smiles_col: str="nostereo_SMILES", 
+                                 id_col: str="num_ID", 
+                                 batch_size: int=100_000):
     """
     Convert a single Parquet file to a temporary .smi chunk file.
     Executed as a Ray task.
@@ -90,7 +92,7 @@ def ray_parquet_to_smi(parquet_files: list[str | Path],
     
 def sort_function(x: Path) -> tuple[int, int]:
     """Sort function for sorting Parquet files."""
-    parts = x.name.split('_')
+    parts = x.stem.split('_')
     hac_part = parts[0]
     db_part = parts[1]
     hac_value = int(hac_part.replace('HAC', '').replace('wrongHAC', '0'))
@@ -107,7 +109,7 @@ def main():
     ray.init(ignore_reinit_error=True, log_to_driver=False)
     # Batch size can match #workers if desired, but each DB is processed fully partitioned
     input_path = Path(input_folder)
-    parquet_files = sorted(input_path.glob("HAC_*/*.parquet"), key=sort_function)
+    parquet_files = sorted(filter(lambda x: 4 <= int(x.parent.name.split("_")[-1]) <= 80 , input_path.glob("HAC_*/*.parquet")), key=sort_function)
     ray_parquet_to_smi(parquet_files, output_smi, batch_size=batch_size)
     
     Path(output_hdf).parent.mkdir(parents=True, exist_ok=True)
