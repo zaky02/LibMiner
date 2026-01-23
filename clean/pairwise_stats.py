@@ -110,11 +110,12 @@ def get_overlap_by_merge(db1: str, db2: str,
     # Use the merge and let Dask manage the partitioning/shuffle
     # If len(df1) and len(df2) are both large, this is the most Dask-idiomatic way.
     # The 'on_disk' flag already handles the memory spill.
+    on_disk = on_disk and (db1 in large_dbs or db2 in large_dbs)
     
     shuffle_method = "disk" if on_disk else "tasks"
     overlap = dd.merge(df1, df2, on=smiles_col, how="inner", shuffle_method=shuffle_method)
-    
-    if on_disk and (db1 in large_dbs or db2 in large_dbs):
+
+    if on_disk:
         overlap.to_parquet(out_dir, write_index=False, compute=True)
         return out_dir
     del df1, df2
