@@ -23,10 +23,8 @@ def parse_args():
                         default='SMILES')
     parser.add_argument('-op','--output_parquet', type=str, help="The name for the redundant_smiles file",   required=False, default='redudant_smiles.parquet')
     parser.add_argument('-id','--id_col', type=str, help='The column name for the original IDs from the databases', required=False, default='ID')
-    parser.add_argument("-ld", "--large_dbs", nargs='*', default=["001", "002", "014", "003"],
-                        help="List of database IDs considered large for on-disk processing.")
     args = parser.parse_args()
-    return args.blocksize, args.database_path, args.smiles_col, args.output_parquet, args.id_col, args.large_dbs
+    return args.blocksize, args.database_path, args.smiles_col, args.output_parquet, args.id_col
 
 
 scheduler_address = os.environ["DASK_SCHEDULER_ADDRESS"]
@@ -96,7 +94,6 @@ def get_overlap_by_merge(db1: str, db2: str,
                         smiles_col: str ="SMILES",
                         id_cols: str = "ID",
                         block_size: str = "64MB",
-                        large_dbs: Sequence[str] = ("001", "002", "014", "003"),
                         on_disk: bool=False):
     
     out_dir =  Path(f"tmp/{db1}_{db2}")
@@ -110,13 +107,13 @@ def get_overlap_by_merge(db1: str, db2: str,
     # Use the merge and let Dask manage the partitioning/shuffle
     # If len(df1) and len(df2) are both large, this is the most Dask-idiomatic way.
     # The 'on_disk' flag already handles the memory spill.
-    on_disk = on_disk and (db1 in large_dbs or db2 in large_dbs)
     
     shuffle_method = "disk" if on_disk else "tasks"
     overlap = dd.merge(df1, df2, on=smiles_col, how="inner", shuffle_method=shuffle_method)
 
     if on_disk:
         overlap.to_parquet(out_dir, write_index=False, compute=True)
+        print(f"💾 Overlap of {db1} and {db2} saved to disk at {out_dir}")
         return out_dir
     del df1, df2
     client.run(gc.collect)
@@ -128,14 +125,13 @@ def get_overlapping_databases(
     smiles_col: str ="SMILES",
     id_cols: str = "ID",
     block_size: str = "64MB",
-    large_dbs: Sequence[str] = ("001", "002", "014", "003"),
     on_disk: bool=False
     ):
     
     overlaps={}
     pairs = [sorted(x) for x in combinations(db_paths.keys(), 2)]
     for db1, db2 in pairs:  # run n bacthes at a time
-        overlap = get_overlap_by_merge(db1, db2, db_paths, smiles_col, id_cols, block_size, large_dbs, on_disk)
+        overlap = get_overlap_by_merge(db1, db2, db_paths, smiles_col, id_cols, block_size, on_disk)
         overlaps[f"{db1}_{db2}"] = overlap
     
     return overlaps
@@ -182,7 +178,7 @@ def save_redundancy(
 
 
 def main():
-    block_size, database_path, smiles_col, out_parquet, id_col, large_dbs = parse_args()
+    block_size, database_path, smiles_col, out_parquet, id_col = parse_args()
     
     with performance_report(filename="dask-pairwise.html"):
         # Batch size can match #workers if desired, but each DB is processed fully partitioned
@@ -219,7 +215,7 @@ def main():
                                                                       batch_size, id_col)
             
             logger.info(f"computing database redundancy {hac}")
-            overlaps = get_overlapping_databases(classified_folders, smiles_col, id_col, block_size, large_dbs, on_disk)
+            overlaps = get_overlapping_databases(classified_folders, smiles_col, id_col, block_size, on_disk)
 
             logger.info(f"Save database redundancy {hac}")
             redundant_counts = save_redundancy(overlaps, smiles_col, out_parq)
