@@ -4,7 +4,7 @@ import time
 from rdkit import RDLogger
 import argparse
 import pyarrow.parquet as pq
-from FPSim2.scripts.create_fpsim2_fp_db import create_db_file_parallel
+from FPSim2.scripts.create_fpsim2_fp_db import create_db_file_parallel, merge_db_files, count_rows, calculate_chunks, read_chunk, create_db_file, generate_time_hash
 import ray
 import json
 import pyarrow.compute as pc
@@ -26,7 +26,7 @@ def parse_args():
     parser.add_argument('-oh', '--output_hdf', type=str, help='The output .h5 filename', 
                         required=False, default='fp_db.h5')
     parser.add_argument("-c", "--cpus", type=int, help="number of processors to run the create_db_file_parallel",
-                        default=4)
+                        default=100)
     args = parser.parse_args()
     return args.input_path, args.output_smi, args.batch_size, args.fp_parm, args.output_hdf, args.cpus, args.fp_type
 
@@ -100,30 +100,71 @@ def sort_function(x: Path) -> tuple[int, int]:
     return (hac_value, db_value)
 
 
+@ray.remote
+def create_db_chunk(args):
+    mols_source, chunk_range, fp_type, fp_params, full_sanitization = args
+    time_hash = generate_time_hash()
+    out_file = f"temp_chunk_{chunk_range[0]}_{time_hash}.h5"
+
+    rows = read_chunk(mols_source, chunk_range[0], chunk_range[1])
+    create_db_file(
+        rows,
+        out_file,
+        mol_format="smiles",
+        fp_type=fp_type,
+        fp_params=fp_params,
+        sort_by_popcnt=False,
+        full_sanitization=full_sanitization,
+    )
+    return out_file
+
+
+def create_db_file_parallel(
+    smi_file, out_file, fp_type, fp_params, full_sanitization, num_processes
+):
+    total_mols = count_rows(smi_file)
+    chunks = calculate_chunks(total_mols, num_processes)
+    futures = [create_db_chunk.remote((smi_file, chunk, fp_type, fp_params, full_sanitization)) for chunk in chunks]
+    tmp_filenames = ray.get(futures)
+
+    merge_db_files(tmp_filenames, out_file, sort_by_popcnt=True)
+
+    # Clean up temporary files
+    for temp_file in tmp_filenames:
+        os.remove(temp_file)
+
+
 def main():
     
     input_folder, output_smi, batch_size, fp_params, output_hdf, cpus, fp_type = parse_args()
     RDLogger.DisableLog('rdApp.*')
     
     start = time.perf_counter()
-    ray.init(ignore_reinit_error=True, log_to_driver=False)
-    # Batch size can match #workers if desired, but each DB is processed fully partitioned
-    input_path = Path(input_folder)
-    parquet_files = sorted(filter(lambda x: 4 <= int(x.parent.name.split("_")[-1]) <= 80 , input_path.glob("HAC_*/*.parquet")), key=sort_function)
-    ray_parquet_to_smi(parquet_files, output_smi, batch_size=batch_size)
+    ray.init(address="auto", log_to_driver=False)
+    print(ray.cluster_resources())
     
+    if not Path(output_smi).exists():
+        print("Converting Parquet files to SMILES...")
+        # Batch size can match #workers if desired, but each DB is processed fully partitioned
+        input_path = Path(input_folder)
+        parquet_files = sorted(filter(lambda x: 4 <= int(x.parent.name.split("_")[-1]) <= 80 , input_path.glob("HAC_*/*.parquet")), key=sort_function)
+        ray_parquet_to_smi(parquet_files, output_smi, batch_size=batch_size)
+        
     Path(output_hdf).parent.mkdir(parents=True, exist_ok=True)
     
-    create_db_file_parallel(
-    smi_file=output_smi, 
-    out_file=output_hdf, 
-    fp_type=fp_type, 
-    fp_params=fp_params, 
-    full_sanitization=False, 
-    num_processes=cpus
-)
+    if not Path(output_hdf).exists():
+        print("Creating fingerprint database...")
+        create_db_file_parallel(
+        smi_file=output_smi, 
+        out_file=output_hdf, 
+        fp_type=fp_type, 
+        fp_params=fp_params, 
+        full_sanitization=False, 
+        num_processes=cpus
+    )
     
-    Path(output_smi).unlink(missing_ok=True)
+        Path(output_smi).unlink(missing_ok=True)
+        
     end = time.perf_counter()
     print(f"Completed in {end - start:.2f} seconds")
 
