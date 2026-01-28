@@ -108,7 +108,7 @@ def get_overlap_by_merge(db1: str, db2: str,
     # If len(df1) and len(df2) are both large, this is the most Dask-idiomatic way.
     # The 'on_disk' flag already handles the memory spill.
     
-    shuffle_method = "disk" if on_disk else "tasks"
+    shuffle_method = "disk" # if on_disk else "tasks"
     overlap = dd.merge(df1, df2, on=smiles_col, how="inner", shuffle_method=shuffle_method)
 
     if on_disk:
@@ -188,8 +188,12 @@ def main():
         progress.touch(exist_ok=True)
         hacs = sorted(database_path.glob("HAC_*"), key=lambda x: int(x.name.split("_")[-1]))
         
+        # restart the tmp folder
+        if Path(f"tmp").exists():
+            shutil.rmtree(f"tmp", ignore_errors=True)
+            
         logger.info(f"start pairwise deduplication: {database_path}")
-        size_limit = 50 * (1024 ** 3)   
+        size_limit = 20 * (1024 ** 3)   
         for hac_folders in hacs:
             hac = hac_folders.name.split("_")[-1]
         
