@@ -28,7 +28,7 @@ def parse_args():
                         required=False, default='fp_db.h5')
     parser.add_argument("-c", "--chunks_per_rank", type=int, help="number of chunks per MPI rank", required=False,
                         default=4)
-    
+
     args = parser.parse_args()
     return args.input_path, args.output_smi, args.batch_size, args.fp_parm, args.output_hdf, args.chunks_per_rank, args.fp_type
 
@@ -136,9 +136,7 @@ def get_chunks(rank, size, comm, output_smi, chunks_per_rank=4):
     else:
         total_mols = None
 
-    print(f"[Rank {rank}] Before bcast", flush=True)
     total_mols = comm.bcast(total_mols, root=0)
-    print(f"[Rank {rank}] After bcast", flush=True)
 
     num_chunks = size * chunks_per_rank
     chunks = calculate_chunks(total_mols, num_chunks)
@@ -151,38 +149,42 @@ def get_chunks(rank, size, comm, output_smi, chunks_per_rank=4):
 
     return my_chunks, num_chunks
 
-def run_chunks_per_rank(rank, my_chunks, fp_type, fp_params, output_smi, TMP_DIR):
+def run_chunks_per_rank(
+    rank: int,
+    my_chunks: list[tuple[int, list[tuple[int, int]]]],
+    fp_type: str,
+    fp_params: dict,
+    output_smi: str | Path,
+    TMP_DIR: Path,
+):
     """
-    Create chunks of H5 files
-
-    Parameters
-    ----------
-    rank : int
-    my_chunks : list[int, list[tuple[int, int]]]
-    fp_type : str
-    fp_params : dict
-    output_smi : str
-    TMP_DIR : Path
-
-    Returns
-    -------
-    completed_files : list[str]
+    Create chunks of H5 files with atomic completion guarantees.
     """
     completed_files = []
+
     for chunk_id, chunk in my_chunks:
-        tmp_file = TMP_DIR / f"chunk_{chunk_id}.h5"
+        final_file = TMP_DIR / f"chunk_{chunk_id}.h5"
+        tmp_file = TMP_DIR / f"chunk_{chunk_id}.h5.tmp"
+
         print(
-        f"[Rank {rank}] Processing chunk {chunk_id} -> {tmp_file}",
-        flush=True
+            f"[Rank {rank}] Processing chunk {chunk_id} -> {final_file}",
+            flush=True
         )
-        
-        if tmp_file.exists():
-            print(f"Rank {rank}: Chunk {chunk_id} already exists, skipping.")
-            completed_files.append(str(tmp_file))
+
+        # If final file exists, it is guaranteed complete
+        if final_file.exists():
+            print(f"[Rank {rank}] Chunk {chunk_id} already completed, skipping.")
+            completed_files.append(str(final_file))
             continue
+
+        # Clean up stale temp file
+        if tmp_file.exists():
+            print(f"[Rank {rank}] Found incomplete temp file for chunk {chunk_id}, removing.")
+            tmp_file.unlink()
+
         try:
-            print(f"Rank {rank}: Creating chunk {chunk_id}")
-    
+            print(f"[Rank {rank}] Creating chunk {chunk_id}")
+
             create_db_file(
                 read_chunk(output_smi, chunk[0], chunk[1]),
                 str(tmp_file),
@@ -192,12 +194,19 @@ def run_chunks_per_rank(rank, my_chunks, fp_type, fp_params, output_smi, TMP_DIR
                 sort_by_popcnt=False,
                 full_sanitization=False,
             )
-            
-            completed_files.append(str(tmp_file))
-            
+
+            # Atomic move: guarantees completeness
+            tmp_file.replace(final_file)
+
+            completed_files.append(str(final_file))
+            print(f"[Rank {rank}] Finished chunk {chunk_id}")
+
         except Exception as e:
-            print(f"Rank {rank}: Error creating chunk {chunk_id}: {e}")
-            
+            print(f"[Rank {rank}] Error creating chunk {chunk_id}: {e}", flush=True)
+            # Ensure no corrupted temp file remains
+            if tmp_file.exists():
+                tmp_file.unlink()
+
     return completed_files
 
 
@@ -256,6 +265,7 @@ def main():
             print("Converting Parquet files to SMILES...")
             out_dir.mkdir(exist_ok=True, parents=True)
             print(f"📁 Created temporary directory: {out_dir}")
+            
         comm.Barrier()
         
         my_chunks = parquet_to_smi_per_rank(rank, size, parquet_files, out_dir, batch_size=batch_size)
