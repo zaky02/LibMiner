@@ -134,7 +134,7 @@ def get_chunks(rank, size, comm, output_smi):
 
     total_mols = comm.bcast(total_mols, root=0)
 
-    num_chunks = int(size / 4)
+    num_chunks = int(size / 2)
     chunks = calculate_chunks(total_mols, num_chunks)
     all_chunks = list(enumerate(chunks))
     my_chunks = all_chunks[rank::size]
