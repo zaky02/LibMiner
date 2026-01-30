@@ -26,11 +26,9 @@ def parse_args():
                         default="Morgan")
     parser.add_argument('-oh', '--output_hdf', type=str, help='The output .h5 filename', 
                         required=False, default='fp_db.h5')
-    parser.add_argument("-c", "--chunks_per_rank", type=int, help="number of chunks per MPI rank", required=False,
-                        default=4)
 
     args = parser.parse_args()
-    return args.input_path, args.output_smi, args.batch_size, args.fp_parm, args.output_hdf, args.chunks_per_rank, args.fp_type
+    return args.input_path, args.output_smi, args.batch_size, args.fp_parm, args.output_hdf, args.fp_type
 
 
 def convert_parquet_to_smi_chunk(parquet_path: str | Path, out_dir: str | Path, 
@@ -71,8 +69,6 @@ def parquet_to_smi_per_rank(rank,
     # ---- Deterministic file assignment ----
     my_files = parquet_files[rank::size]
     # Step 1. Launch Ray tasks for each Parquet file
-    print(f"[Rank {rank}] Processing {len(my_files)} parquet files")
-
     my_chunks = []
     for pq_file in my_files:
         try:
@@ -95,7 +91,7 @@ def merge_smi_file(all_chunks: list[list[str]],
                    parquet_files: list[str | Path],
                    out_dir: str | Path):
     
-    all_chunks_flat = [c for sub in all_chunks for c in sub]
+    all_chunks_flat = sorted([c for sub in all_chunks for c in sub], key=sort_function)
     
     expected = {str((out_dir / (Path(pq_file).stem + ".smi"))) for pq_file in parquet_files}
 
@@ -118,9 +114,9 @@ def merge_smi_file(all_chunks: list[list[str]],
             
     out_dir.rmdir()            
 
-def sort_function(x: Path) -> tuple[int, int]:
+def sort_function(x: str | Path) -> tuple[int, int]:
     """Sort function for sorting Parquet files."""
-    parts = x.stem.split('_')
+    parts = Path(x).stem.split('_')
     hac_part = parts[0]
     db_part = parts[1]
     hac_value = int(hac_part.replace('HAC', '').replace('wrongHAC', '0'))
@@ -128,7 +124,7 @@ def sort_function(x: Path) -> tuple[int, int]:
     return (hac_value, db_value)
 
 
-def get_chunks(rank, size, comm, output_smi, chunks_per_rank=4):
+def get_chunks(rank, size, comm, output_smi):
     if rank == 0:
         print("[Rank 0] Starting count_rows()", flush=True)
         total_mols = count_rows(output_smi)
@@ -138,12 +134,12 @@ def get_chunks(rank, size, comm, output_smi, chunks_per_rank=4):
 
     total_mols = comm.bcast(total_mols, root=0)
 
-    num_chunks = size * chunks_per_rank
+    num_chunks = int(size / 4)
     chunks = calculate_chunks(total_mols, num_chunks)
     all_chunks = list(enumerate(chunks))
     my_chunks = all_chunks[rank::size]
     print(
-        f"[Rank {rank}] Assigned {len(my_chunks)} chunks",
+        f"[Rank {rank}] Assigned {len(my_chunks)} chunks with IDs {" ".join([str(c[0]) for c in my_chunks])}",
         flush=True
     )
 
@@ -165,11 +161,6 @@ def run_chunks_per_rank(
     for chunk_id, chunk in my_chunks:
         final_file = TMP_DIR / f"chunk_{chunk_id}.h5"
         tmp_file = TMP_DIR / f"chunk_{chunk_id}.h5.tmp"
-
-        print(
-            f"[Rank {rank}] Processing chunk {chunk_id} -> {final_file}",
-            flush=True
-        )
 
         # If final file exists, it is guaranteed complete
         if final_file.exists():
@@ -214,7 +205,7 @@ def create_db_file_merged(
     all_files, num_chunks, output_hdf, TMP_DIR
 ):
     
-    all_files_flat = [f for sublist in all_files for f in sublist]
+    all_files_flat = sorted([f for sublist in all_files for f in sublist], key=lambda x: int(Path(x).stem.split('_')[-1]))
         # Ensure all expected chunks exist
     expected = {
         (TMP_DIR/f"chunk_{chunk_id}.h5")
@@ -244,7 +235,7 @@ def create_db_file_merged(
 
 def main():
     
-    input_folder, output_smi, batch_size, fp_params, output_hdf, chunks_per_rank, fp_type = parse_args()
+    input_folder, output_smi, batch_size, fp_params, output_hdf, fp_type = parse_args()
     RDLogger.DisableLog('rdApp.*')
     
     start = time.perf_counter()
@@ -264,7 +255,6 @@ def main():
         if rank == 0:
             print("Converting Parquet files to SMILES...")
             out_dir.mkdir(exist_ok=True, parents=True)
-            print(f"📁 Created temporary directory: {out_dir}")
             
         comm.Barrier()
         
@@ -287,7 +277,7 @@ def main():
         
         comm.Barrier()
         
-        my_chunks, num_chunks = get_chunks(rank, size, comm, output_smi, chunks_per_rank=chunks_per_rank)
+        my_chunks, num_chunks = get_chunks(rank, size, comm, output_smi)
         # ---- Only rank 0 does expensive global work ----
         completed_files = run_chunks_per_rank(rank, my_chunks, fp_type, fp_params, output_smi, TMP_DIR)
         # ---- Gather completed parts on rank 0 ----
