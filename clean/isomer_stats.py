@@ -1,4 +1,3 @@
-import gc
 import dask.dataframe as dd
 from dask.distributed import Client, performance_report
 import os
@@ -8,7 +7,7 @@ import dask
 import pandas as pd
 import logging
 from utils import convert_folder
-from typing import Sequence
+import shutil
 from itertools import combinations
 
 
@@ -16,16 +15,14 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Deduplicate SMILES')
     parser.add_argument('-bs', '--blocksize', type=str, help='Block size for dask dataframe. The safest is the default 64MB',  required=False, default='64MB')
     parser.add_argument('-dp','--database_path', type=str, help='The folder path for the database', required=False,
-                        default='Molecular_database/deduplicate_canonical')
+                        default='Molecular_database')
     parser.add_argument('-o','--output_path', type=str, help='The folder path for the output', required=False,
                         default='Molecular_database')
     parser.add_argument('-n','--nostereo', type=str, help='The column name of the non stereo smiles', required=False,
                         default='nostereo_SMILES')
-    parser.add_argument("-ld", "--large_dbs", nargs='*', default=["001", "002", "014", "003"],
-                        help="List of database IDs considered large for on-disk processing.")
     
     args = parser.parse_args()
-    return args.blocksize, args.database_path, args.nostereo, args.output_path, args.large_dbs
+    return args.blocksize, args.database_path, args.nostereo, args.output_path
 
 scheduler_address = os.environ["DASK_SCHEDULER_ADDRESS"]
 client = Client(scheduler_address)    # Connect to that cluster
@@ -38,7 +35,7 @@ logger = logging.getLogger(__name__)
 def compute_internal_duplication(
     db_paths: dict[str, str],
     smiles_cols: str = "nostereo_SMILES",
-    block_size: str = "64MB",
+    block_size: str = '64MB',
     batch_size: int = 2,
 ):
     """
@@ -72,19 +69,17 @@ def compute_internal_duplication(
 def get_overlap_by_merge(db1: str, db2: str, 
                         db_paths: dict[str, str], 
                         smiles_col: str ="nostereo_SMILES",
-                        block_size: str = "64MB",
-                        large_dbs: Sequence[str] = ("001", "002", "014", "003"),
+                        block_size: str = '64MB',
                         on_disk: bool=False):
-
+    
     df1 = dd.read_parquet(db_paths[db1], columns=[smiles_col], blocksize=block_size).drop_duplicates(subset=smiles_col)
     df2 = dd.read_parquet(db_paths[db2], columns=[smiles_col], blocksize=block_size).drop_duplicates(subset=smiles_col)
 
-    shuffle_method = "disk" if on_disk and (db1 in large_dbs or db2 in large_dbs) else "tasks"
+    shuffle_method = "disk" if on_disk else "tasks"
     overlap = dd.merge(df1, df2, on=smiles_col, how="inner", shuffle_method=shuffle_method)
-    over = overlap.map_partitions(len).sum().compute()
     
-    del df1, df2
-    client.run(gc.collect)
+    over = overlap.map_partitions(len).sum().compute()
+    del df1, df2, overlap
     
     return over
 
@@ -93,16 +88,18 @@ def get_pairwise_overlaps(
     db_paths: dict[str, str],
     smiles_col: str ="nostereo_SMILES",
     block_size: str = "64MB",
-    large_dbs: Sequence[str] = ("001", "002", "014", "003"),
     on_disk: bool=False
     ):
     
     overlaps={}
     pairs = [sorted(x) for x in combinations(db_paths.keys(), 2)]
     for db1, db2 in pairs:  # run n bacthes at a time
-        over = get_overlap_by_merge(db1, db2, db_paths, smiles_col, block_size, large_dbs, on_disk)
+        over = get_overlap_by_merge(db1, db2, db_paths, smiles_col, block_size, on_disk)
+        #if isinstance(over, Path):
+        #    overlaps[f"{db1}_{db2}"] = len(pd.read_parquet(over))
         overlaps[f"{db1}_{db2}"] = over
-
+        del over
+        
     return pd.Series(
         list(overlaps.values()),
         index=overlaps.keys(),
@@ -111,7 +108,7 @@ def get_pairwise_overlaps(
 
 
 def main():
-    block_size, database_path, smiles_col, output_path, large_dbs = parse_args()
+    block_size, database_path, smiles_col, output_path = parse_args()
     
     with performance_report(filename="dask-isomer.html"):
         # Batch size can match #workers if desired, but each DB is processed fully partitioned
@@ -120,9 +117,9 @@ def main():
         progress = Path("progress_isomers.txt")
         progress.touch(exist_ok=True)
         hacs = sorted(database_path.glob("HAC_*"), key=lambda x: int(x.name.split("_")[-1]))
-        
+            
         logger.info(f"start isomer deduplication: {database_path}")
-        size_limit = 50 * (1024 ** 3)   
+        size_limit = 30 * (1024 ** 3)   # 50 GB
         for hac_folders in hacs:
             hac = hac_folders.name.split("_")[-1]
         
@@ -135,7 +132,7 @@ def main():
             batch_size = 4
             on_disk = False
             if file_sizes >= size_limit:
-                batch_size = 2
+                batch_size = 1
                 on_disk=True
                 
             out_parq = output_stats / hac 
@@ -143,17 +140,16 @@ def main():
             
             classified_folders = convert_folder(hac_folders)
             logger.info(f"computing internal stats {hac}")
-            internal_counts = compute_internal_duplication(classified_folders, smiles_col, block_size, 
-                                                                      batch_size)
+            internal_counts = compute_internal_duplication(classified_folders, smiles_col, block_size, batch_size)
             
             logger.info(f"computing database redundancy {hac}")
-            overlaps = get_pairwise_overlaps(classified_folders, smiles_col,block_size, large_dbs, on_disk)
+            overlaps = get_pairwise_overlaps(classified_folders, smiles_col,block_size, on_disk)
             internal_counts.to_csv(output_stats/hac/"internal_duplication.csv")
             overlaps.to_csv(output_stats/hac/"pairwise_duplication.csv")
 
             with open(progress, "a") as f:
                 f.write(f"HAC {hac} done\n")
-    
+                
         for n in ["pairwise_duplication.csv", "internal_duplication.csv"]:
             files = Path(output_stats).glob(f"*/{n}")
             pd.concat({f.parents.name: pd.read_csv(f, index_col=0) for f in files}).to_csv(output_stats/f"total_{n}")     
