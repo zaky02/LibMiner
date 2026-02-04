@@ -1,6 +1,6 @@
 """
-Create a fingerprint database from SMILES stored in Parquet files using MPI for parallelism.
-Each MPI rank processes a subset of Parquet files, converts them to SMILES format, and then creates fingerprint chunks.
+Create a fingerprint database from SMILES stored in Parquet files using SLURM for parallelism.
+Each array processes a subset of Parquet files, converts them to SMILES format, and then creates fingerprint chunks depending on the stage
 The final fingerprint database is merged from all chunks.
 
 """
@@ -31,11 +31,11 @@ def parse_args():
                         default="Morgan")
     parser.add_argument('-oh', '--output_hdf', type=str, help='The output .h5 filename', 
                         required=False, default='fp_db.h5')
-    parser.add_argument('--stage', type=str, choices=['convert', 'fingerprint', 'merge_smi', 'merge_fp'], 
+    parser.add_argument('-s', '--stage', type=str, choices=['convert', 'fingerprint', 'merge_smi', 'merge_fp'], 
                         help='Processing stage', required=True)
 
     args = parser.parse_args()
-    return args
+    return args.output_smi, args.input_path, args.batch_size, args.fp_param, args.fp_type, args.output_hdf, args.stage
 
 
 def sort_function(x: str | Path) -> tuple[int, int]:
@@ -75,7 +75,7 @@ def convert_parquet_to_smi_chunk(parquet_path: str | Path, out_dir: str | Path,
     return str(smi_temp)
 
 
-def stage_convert_parquet(args):
+def stage_convert_parquet(input_path: str | Path, output_smi: str | Path, batch_size: int):
     """Stage 1: Convert parquet files to SMI chunks (parallelized via SLURM array)"""
     
     # Get SLURM array task ID and count
@@ -84,14 +84,14 @@ def stage_convert_parquet(args):
     
     print(f"[Task {task_id}/{array_size}] Starting parquet conversion")
     
-    input_path = Path(args.input_path)
+    input_path = Path(input_path)
     parquet_files = sorted(
         filter(lambda x: 4 <= int(x.parent.name.split("_")[-1]) <= 80, 
                input_path.glob("HAC_*/*.parquet")), 
         key=sort_function
     )
     
-    out_dir = Path(args.output_smi).parent / "_tmp_smi_chunks"
+    out_dir = Path(output_smi).parent / "_tmp_smi_chunks"
     out_dir.mkdir(exist_ok=True, parents=True)
     
     # Assign files to this task
@@ -104,7 +104,7 @@ def stage_convert_parquet(args):
             convert_parquet_to_smi_chunk(
                 pq_file,
                 out_dir,
-                batch_size=args.batch_size,
+                batch_size=batch_size,
             )
         except Exception as e:
             print(f"[Task {task_id}] ERROR processing {pq_file}: {e}")
@@ -113,19 +113,19 @@ def stage_convert_parquet(args):
     print(f"[Task {task_id}] Completed all assigned files")
 
 
-def stage_merge_smi(args):
+def stage_merge_smi(input_path: str | Path, output_smi: str | Path):
     """Stage 2: Merge all SMI chunks into final file (single job)"""
     
     print("Merging SMI chunks...")
     
-    input_path = Path(args.input_path)
+    input_path = Path(input_path)
     parquet_files = sorted(
         filter(lambda x: 4 <= int(x.parent.name.split("_")[-1]) <= 80, 
                input_path.glob("HAC_*/*.parquet")), 
         key=sort_function
     )
     
-    out_dir = Path(args.output_smi).parent / "_tmp_smi_chunks"
+    out_dir = Path(output_smi).parent / "_tmp_smi_chunks"
     
     # Collect all expected chunk files
     chunk_files = sorted([
@@ -142,8 +142,8 @@ def stage_merge_smi(args):
         sys.exit(1)
     
     # Merge chunks
-    print(f"Merging {len(chunk_files)} chunks into {args.output_smi}")
-    with open(args.output_smi, "w", encoding="utf-8") as out_f:
+    print(f"Merging {len(chunk_files)} chunks into {output_smi}")
+    with open(output_smi, "w", encoding="utf-8") as out_f:
         for chunk_file in chunk_files:
             print(f"  Adding {chunk_file.name}")
             with open(chunk_file, "r", encoding="utf-8") as cf:
@@ -154,10 +154,10 @@ def stage_merge_smi(args):
     if out_dir.exists() and not any(out_dir.iterdir()):
         out_dir.rmdir()
     
-    print(f"SMILES file created at {args.output_smi}")
+    print(f"SMILES file created at {output_smi}")
 
 
-def stage_create_fingerprints(args):
+def stage_create_fingerprints(output_smi: str | Path, fp_type: str, fp_param: dict):
     """Stage 3: Create fingerprint chunks (parallelized via SLURM array)"""
     
     # Get SLURM array task ID
@@ -170,7 +170,7 @@ def stage_create_fingerprints(args):
     TMP_DIR.mkdir(exist_ok=True)
     
     # Count total molecules
-    total_mols = count_rows(args.output_smi)
+    total_mols = count_rows(output_smi)
     print(f"[Task {task_id}] Total molecules: {total_mols}")
     
     # Calculate chunks
@@ -201,11 +201,11 @@ def stage_create_fingerprints(args):
         print(f"[Task {task_id}] Creating chunk {chunk_id} (rows {chunk[0][0]}-{chunk[-1][1]})")
         
         create_db_file(
-            read_chunk(args.output_smi, chunk[0], chunk[1]),
+            read_chunk(output_smi, chunk[0], chunk[1]),
             str(tmp_file),
             mol_format="smiles",
-            fp_type=args.fp_type,
-            fp_params=args.fp_param,
+            fp_type=fp_type,
+            fp_params=fp_param,
             sort_by_popcnt=False,
             full_sanitization=False,
         )
@@ -222,7 +222,7 @@ def stage_create_fingerprints(args):
         sys.exit(1)
 
 
-def stage_merge_fingerprints(args):
+def stage_merge_fingerprints(output_hdf: str | Path):
     """Stage 4: Merge fingerprint chunks into final database (single job)"""
     
     print("Merging fingerprint chunks...")
@@ -252,10 +252,10 @@ def stage_merge_fingerprints(args):
         sys.exit(1)
     
     # Merge all chunks
-    print(f"Merging {len(chunk_files)} chunks into {args.output_hdf}")
-    merge_db_files([str(f) for f in chunk_files], args.output_hdf, sort_by_popcnt=True)
+    print(f"Merging {len(chunk_files)} chunks into {output_hdf}")
+    merge_db_files([str(f) for f in chunk_files], output_hdf, sort_by_popcnt=True)
     
-    print(f"Fingerprint database created at {args.output_hdf}")
+    print(f"Fingerprint database created at {output_hdf}")
     
     # Clean up
     for chunk_file in chunk_files:
@@ -265,29 +265,29 @@ def stage_merge_fingerprints(args):
         TMP_DIR.rmdir()
     
     # Optionally remove SMI file
-    # Path(args.output_smi).unlink(missing_ok=True)
+    # Path(output_smi).unlink(missing_ok=True)
 
 
 def main():
-    args = parse_args()
+    output_smi, input_path, batch_size, fp_param, fp_type, output_hdf, stage = parse_args()
     RDLogger.DisableLog('rdApp.*')
     
     start = time.perf_counter()
     
-    if args.stage == 'convert':
-        stage_convert_parquet(args)
-    elif args.stage == 'merge_smi':
-        stage_merge_smi(args)
-    elif args.stage == 'fingerprint':
-        stage_create_fingerprints(args)
-    elif args.stage == 'merge_fp':
-        stage_merge_fingerprints(args)
+    if stage == 'convert':
+        stage_convert_parquet(output_smi, input_path, batch_size)
+    elif stage == 'merge_smi':
+        stage_merge_smi(output_smi)
+    elif stage == 'fingerprint':
+        stage_create_fingerprints(output_smi, fp_type, fp_param)
+    elif stage == 'merge_fp':
+        stage_merge_fingerprints(output_hdf)
     else:
-        print(f"Unknown stage: {args.stage}")
+        print(f"Unknown stage: {stage}")
         sys.exit(1)
     
     end = time.perf_counter()
-    print(f"Stage '{args.stage}' completed in {end - start:.2f} seconds")
+    print(f"Stage '{stage}' completed in {end - start:.2f} seconds")
 
 
 if __name__ == "__main__":

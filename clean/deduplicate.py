@@ -3,10 +3,10 @@ It is used 2 times during the creation of the database -> the first time is on t
 You can use the default options
 
 For the second time you have to change the following options:
-- --use_cols nostereo_SMILES
+- --use_cols nostereo_SMILES db_id
 - --drop_cols nostereo_SMILES
 - --assign_ids (to set it to true)
-- --meta '{"nostereo_SMILES": "string", "num_ID": "int64"}'
+- --meta '{"nostereo_SMILES": "string", "num_ID": "int64", "db_id": "string"}'
 - --input_path to the output_path of the first deduplication, if default would be 'Molecular_database/deduplicated'
 - --output_path to a different folder, for example 'Molecular_database/deduplicated_nostereo'
 

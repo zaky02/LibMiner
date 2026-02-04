@@ -6,3 +6,4 @@ clean/*.smi
 clean/*.h5
 clean/*.csv
 clean/test_files
+clean/files
