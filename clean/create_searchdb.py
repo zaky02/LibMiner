@@ -198,7 +198,7 @@ def stage_create_fingerprints(output_smi: str | Path, fp_type: str, fp_param: di
         tmp_file.unlink()
     
     try:
-        print(f"[Task {task_id}] Creating chunk {chunk_id} (rows {chunk[0][0]}-{chunk[-1][1]})")
+        print(f"[Task {task_id}] Creating chunk {chunk_id} (rows {chunk[0]}-{chunk[1]})")
         
         create_db_file(
             read_chunk(output_smi, chunk[0], chunk[1]),
