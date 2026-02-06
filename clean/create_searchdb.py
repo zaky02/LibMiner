@@ -30,7 +30,7 @@ def parse_args():
     parser.add_argument('-ft','--fp_type', type=str, help='Fingerprint type supported by FPSim2', required=False,
                         default="Morgan")
     parser.add_argument('-oh', '--output_hdf', type=str, help='The output .h5 filename', 
-                        required=False, default='fp_db.h5')
+                        required=False, default='search_db.h5')
     parser.add_argument('-s', '--stage', type=str, choices=['convert', 'fingerprint', 'merge_smi', 'merge_fp'], 
                         help='Processing stage', required=True)
     parser.add_argument('-a', '--array_size', type=int, help='SLURM array size (number of parallel tasks)', required=False, default=100)
@@ -273,7 +273,7 @@ def main():
     start = time.perf_counter()
     
     if stage == 'convert':
-        stage_convert_parquet(output_smi, input_path, batch_size)
+        stage_convert_parquet(input_path, output_smi, batch_size)
     elif stage == 'merge_smi':
         stage_merge_smi(input_path, output_smi)
     elif stage == 'fingerprint':
