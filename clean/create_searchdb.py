@@ -33,10 +33,10 @@ def parse_args():
                         required=False, default='fp_db.h5')
     parser.add_argument('-s', '--stage', type=str, choices=['convert', 'fingerprint', 'merge_smi', 'merge_fp'], 
                         help='Processing stage', required=True)
+    parser.add_argument('-a', '--array_size', type=int, help='SLURM array size (number of parallel tasks)', required=False, default=100)
 
     args = parser.parse_args()
-    return args.output_smi, args.input_path, args.batch_size, args.fp_param, args.fp_type, args.output_hdf, args.stage
-
+    return args.output_smi, args.input_path, args.batch_size, args.fp_param, args.fp_type, args.output_hdf, args.stage, args.array_size
 
 def sort_function(x: str | Path) -> tuple[int, int]:
     """Sort function for sorting Parquet files."""
@@ -222,14 +222,12 @@ def stage_create_fingerprints(output_smi: str | Path, fp_type: str, fp_param: di
         sys.exit(1)
 
 
-def stage_merge_fingerprints(output_hdf: str | Path):
+def stage_merge_fingerprints(output_hdf: str | Path, array_size: int):
     """Stage 4: Merge fingerprint chunks into final database (single job)"""
     
     print("Merging fingerprint chunks...")
     
     TMP_DIR = Path("tmp_chunks")
-    
-    array_size = int(os.environ.get('SLURM_ARRAY_TASK_COUNT', 1))
     
     # We need to know how many chunks were created
     # This should match the array size used in stage 3
@@ -269,7 +267,7 @@ def stage_merge_fingerprints(output_hdf: str | Path):
 
 
 def main():
-    output_smi, input_path, batch_size, fp_param, fp_type, output_hdf, stage = parse_args()
+    output_smi, input_path, batch_size, fp_param, fp_type, output_hdf, stage, array_size = parse_args()
     RDLogger.DisableLog('rdApp.*')
     
     start = time.perf_counter()
@@ -277,11 +275,11 @@ def main():
     if stage == 'convert':
         stage_convert_parquet(output_smi, input_path, batch_size)
     elif stage == 'merge_smi':
-        stage_merge_smi(output_smi)
+        stage_merge_smi(input_path, output_smi)
     elif stage == 'fingerprint':
         stage_create_fingerprints(output_smi, fp_type, fp_param)
     elif stage == 'merge_fp':
-        stage_merge_fingerprints(output_hdf)
+        stage_merge_fingerprints(output_hdf, array_size)
     else:
         print(f"Unknown stage: {stage}")
         sys.exit(1)
