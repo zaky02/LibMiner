@@ -32,7 +32,6 @@ def parse_args():
     parser.add_argument('-oh', '--output_hdf', type=str, help='The output .h5 filename', 
                         required=False, default='search_db.h5')
     parser.add_argument('-s', '--stage', type=str, choices=['convert', 'fingerprint', 'merge_smi', 'merge_batches', 'merge_final'], help='Processing stage', required=True)
-    parser.add_argument('-a', '--array_size', type=int, help='SLURM array size (number of parallel tasks)', required=False, default=100)
 
     args = parser.parse_args()
     return args.output_smi, args.input_path, args.batch_size, args.fp_param, args.fp_type, args.output_hdf, args.stage, args.array_size
@@ -306,7 +305,7 @@ def stage_merge_final(output_hdf: str | Path):
 
 
 def main():
-    output_smi, input_path, batch_size, fp_param, fp_type, output_hdf, stage, array_size = parse_args()
+    output_smi, input_path, batch_size, fp_param, fp_type, output_hdf, stage = parse_args()
     RDLogger.DisableLog('rdApp.*')
     
     start = time.perf_counter()
