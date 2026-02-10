@@ -222,17 +222,19 @@ def stage_create_fingerprints(output_smi: str | Path, fp_type: str, fp_param: di
         sys.exit(1)
 
 
-def stage_merge_fingerprints(output_hdf: str | Path, array_size: int):
+def stage_merge_fingerprints():
     """Stage 4: Merge fingerprint chunks into final database (single job)"""
     
-    print("Merging fingerprint chunks...")
-    
+    task_id = int(os.environ.get('SLURM_ARRAY_TASK_ID', 0))
+    array_size = int(os.environ.get('SLURM_ARRAY_TASK_COUNT', 1))
+        
     TMP_DIR = Path("tmp_chunks")
-    
+    MERGE_DIR = Path("tmp_merge_batches")
+    MERGE_DIR.mkdir(exist_ok=True)
     # We need to know how many chunks were created
-    # This should match the array size used in stage 3
+
     chunk_files = sorted(TMP_DIR.glob("chunk_*.h5"), 
-                        key=lambda x: int(x.stem.split('_')[-1]))
+                         key=lambda x: int(x.stem.split('_')[-1]))
     
     if not chunk_files:
         print("ERROR: No chunk files found")
@@ -240,30 +242,68 @@ def stage_merge_fingerprints(output_hdf: str | Path, array_size: int):
     
     print(f"Found {len(chunk_files)} chunk files")
     
-    # Check for any missing chunks
-    chunk_ids = sorted([int(f.stem.split('_')[-1]) for f in chunk_files])
-    expected_ids = list(range(array_size))
+    my_chunks = chunk_files[task_id::array_size]
+    batch_output = MERGE_DIR / f"batch_{task_id}.h5"
     
-    missing = set(expected_ids) - set(chunk_ids)
-    if missing:
-        print(f"ERROR: Missing chunks: {sorted(missing)}")
+    # Skip if already done
+    if batch_output.exists():
+        print(f"[Task {task_id}] Batch already exists, skipping")
+        return
+    
+    print(f"[Task {task_id}] Merging {len(my_chunks)} chunks into batch_{task_id}.h5")
+    
+    # Merge WITHOUT sorting (sorting is slow and done only once at the end)
+    merge_db_files([str(f) for f in my_chunks], str(batch_output), sort_by_popcnt=False)
+    
+    print(f"[Task {task_id}] Batch merge complete")
+    
+
+def stage_merge_final(output_hdf: str | Path):
+    """Stage 4b: Merge all batches into final sorted database (single job)"""
+    
+    print("Merging batch files into final database...")
+    
+    MERGE_DIR = Path("tmp_merge_batches")
+    
+    if not MERGE_DIR.exists():
+        print("ERROR: Batch directory not found. Run merge_batches stage first.")
         sys.exit(1)
     
-    # Merge all chunks
-    print(f"Merging {len(chunk_files)} chunks into {output_hdf}")
-    merge_db_files([str(f) for f in chunk_files], output_hdf, sort_by_popcnt=True)
+    # Get all batch files
+    batch_files = sorted(MERGE_DIR.glob("batch_*.h5"),
+                        key=lambda x: int(x.stem.split('_')[-1]))
+    
+    if not batch_files:
+        print("ERROR: No batch files found")
+        sys.exit(1)
+    
+    print(f"Found {len(batch_files)} batch files")
+    
+    # Check if final file already exists
+    if Path(output_hdf).exists():
+        print(f"Final database {output_hdf} already exists, skipping merge")
+        return 
+    
+    merge_db_files([str(f) for f in batch_files], str(output_hdf), sort_by_popcnt=True)
     
     print(f"Fingerprint database created at {output_hdf}")
     
-    # Clean up
-    for chunk_file in chunk_files:
-        os.remove(chunk_file)
+    # Clean up batch files
+    print("Cleaning up batch files...")
+    for batch_file in batch_files:
+        os.remove(batch_file)
     
-    if TMP_DIR.exists() and not any(TMP_DIR.iterdir()):
-        TMP_DIR.rmdir()
+    if MERGE_DIR.exists() and not any(MERGE_DIR.iterdir()):
+        MERGE_DIR.rmdir()
     
-    # Optionally remove SMI file
-    # Path(output_smi).unlink(missing_ok=True)
+    # Clean up original chunks
+    TMP_DIR = Path("tmp_chunks")
+    if TMP_DIR.exists():
+        print("Cleaning up chunk files...")
+        for chunk_file in TMP_DIR.glob("chunk_*.h5"):
+            os.remove(chunk_file)
+        if not any(TMP_DIR.iterdir()):
+            TMP_DIR.rmdir()
 
 
 def main():
@@ -278,8 +318,10 @@ def main():
         stage_merge_smi(input_path, output_smi)
     elif stage == 'fingerprint':
         stage_create_fingerprints(output_smi, fp_type, fp_param)
-    elif stage == 'merge_fp':
-        stage_merge_fingerprints(output_hdf, array_size)
+    elif stage == 'merge_batches':
+        stage_merge_fingerprints()
+    elif stage == 'merge_final':
+        stage_merge_final(output_hdf)
     else:
         print(f"Unknown stage: {stage}")
         sys.exit(1)
