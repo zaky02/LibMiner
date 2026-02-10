@@ -31,8 +31,7 @@ def parse_args():
                         default="Morgan")
     parser.add_argument('-oh', '--output_hdf', type=str, help='The output .h5 filename', 
                         required=False, default='search_db.h5')
-    parser.add_argument('-s', '--stage', type=str, choices=['convert', 'fingerprint', 'merge_smi', 'merge_fp'], 
-                        help='Processing stage', required=True)
+    parser.add_argument('-s', '--stage', type=str, choices=['convert', 'fingerprint', 'merge_smi', 'merge_batches', 'merge_final'], help='Processing stage', required=True)
     parser.add_argument('-a', '--array_size', type=int, help='SLURM array size (number of parallel tasks)', required=False, default=100)
 
     args = parser.parse_args()
