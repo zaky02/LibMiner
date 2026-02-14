@@ -11,7 +11,10 @@ import sys
 from rdkit import RDLogger
 import argparse
 import pyarrow.parquet as pq
-from FPSim2.scripts.create_fpsim2_fp_db import merge_db_files, count_rows, calculate_chunks, read_chunk, create_db_file
+from FPSim2.scripts.create_fpsim2_fp_db import count_rows, calculate_chunks, read_chunk, create_db_file
+from FPSim2.io.chem import get_fp_length
+from FPSim2.io.backends.pytables import create_schema, sort_db_file
+import tables as tb
 import json
 import pyarrow.compute as pc
 import pyarrow as pa
@@ -31,10 +34,10 @@ def parse_args():
                         default="Morgan")
     parser.add_argument('-oh', '--output_hdf', type=str, help='The output .h5 filename', 
                         required=False, default='search_db.h5')
-    parser.add_argument('-s', '--stage', type=str, choices=['convert', 'fingerprint', 'merge_smi', 'merge_batches', 'merge_final'], help='Processing stage', required=True)
+    parser.add_argument('-s', '--stage', type=str, choices=['convert', 'fingerprint', 'merge_smi', 'merge_batches', 'merge_final', "index", "sort"], help='Processing stage', required=True)
 
     args = parser.parse_args()
-    return args.output_smi, args.input_path, args.batch_size, args.fp_param, args.fp_type, args.output_hdf, args.stage, args.array_size
+    return args.output_smi, args.input_path, args.batch_size, args.fp_param, args.fp_type, args.output_hdf, args.stage
 
 def sort_function(x: str | Path) -> tuple[int, int]:
     """Sort function for sorting Parquet files."""
@@ -155,6 +158,89 @@ def stage_merge_smi(input_path: str | Path, output_smi: str | Path):
     print(f"SMILES file created at {output_smi}")
 
 
+def create_index_on_existing_file(db_file: str | Path, 
+                                  tmp_dir: str = None, 
+                                  block_size: tuple[int, int, int, int] = None):
+    """Create index on an existing PyTables file."""
+    if tmp_dir is None:
+        tmp_dir = Path(db_file).parent / Path(db_file).stem + "_tmp_index"
+        tmp_dir.mkdir(exist_ok=True)
+        
+    with tb.open_file(db_file, mode="a") as f:  # ← "a" for append/modify
+        # Check if index already exists
+        if f.root.fps.cols.popcnt.is_indexed:
+            print(f"Index already exists on {db_file}")
+            return
+        
+        print(f"Creating index on {db_file}...")
+        f.root.fps.cols.popcnt.create_index(
+            kind="full",
+            tmp_dir=tmp_dir,
+            _blocksizes=block_size
+        )
+        print("Index created successfully!")
+
+
+def merge_db_files(
+    input_files: list[str], output_file: str
+) -> None:
+    """Merges multiple FPs db files into a new one.
+
+    Parameters
+    ----------
+    input_files : List[str]
+        List of paths to input files
+    output_file : str
+        Path to output merged file
+    sort_by_popcnt : bool, optional
+        Whether to sort the output file by population count, by default True
+    """
+    if len(input_files) < 2:
+        raise ValueError("At least two input files are required for merging")
+
+    # Check that all files have same fingerprint type, parameters and RDKit version
+    reference_configs = None
+    for file in input_files:
+        with tb.open_file(file, mode="r") as f:
+            current_configs = (
+                f.root.config[0],
+                f.root.config[1],
+                f.root.config[2],
+                f.root.config[3],
+            )
+            if reference_configs is None:
+                reference_configs = current_configs
+            elif current_configs != reference_configs:
+                raise ValueError(
+                    f"File {file} has different fingerprint types, parameters or RDKit versions"
+                )
+
+    # Create new file with same parameters
+    filters = tb.Filters(complib="blosc2", complevel=9, fletcher32=False)
+    fp_type, fp_params, original_rdkit_ver, original_fpsim2_ver = reference_configs
+    fp_length = get_fp_length(fp_type, fp_params)
+
+    with tb.open_file(output_file, mode="w") as out_file:
+        particle = create_schema(fp_length)
+        fps_table = out_file.create_table(
+            out_file.root, "fps", particle, "Table storing fps", filters=filters
+        )
+
+        # Copy config with original RDKit version
+        param_table = out_file.create_vlarray(
+            out_file.root, "config", atom=tb.ObjectAtom()
+        )
+        param_table.append(fp_type)
+        param_table.append(fp_params)
+        param_table.append(original_rdkit_ver)
+        param_table.append(original_fpsim2_ver)
+
+        # Copy data from all input files (appending one by one)
+        for file in input_files:
+            with tb.open_file(file, mode="r") as in_file:
+                fps_table.append(in_file.root.fps[:])
+                
+
 def stage_create_fingerprints(output_smi: str | Path, fp_type: str, fp_param: dict):
     """Stage 3: Create fingerprint chunks (parallelized via SLURM array)"""
     
@@ -220,7 +306,8 @@ def stage_create_fingerprints(output_smi: str | Path, fp_type: str, fp_param: di
         sys.exit(1)
 
 
-def stage_merge_fingerprints():
+def stage_merge_fingerprints(final: bool = False, 
+                             output_hdf: str | Path | None = None):
     """Stage 4: Merge fingerprint chunks into final database (single job)"""
     
     task_id = int(os.environ.get('SLURM_ARRAY_TASK_ID', 0))
@@ -230,9 +317,23 @@ def stage_merge_fingerprints():
     MERGE_DIR = Path("tmp_merge_batches")
     MERGE_DIR.mkdir(exist_ok=True)
     # We need to know how many chunks were created
-
     chunk_files = sorted(TMP_DIR.glob("chunk_*.h5"), 
                          key=lambda x: int(x.stem.split('_')[-1]))
+    
+    if final:
+        # If this is the final stage, merge all batches into a single file
+        if output_hdf is None:
+            print("ERROR: output_hdf must be specified for final merge stage")
+            sys.exit(1)
+        output_file = Path(output_hdf)
+        batch_files = sorted(MERGE_DIR.glob("batch_*.h5"),
+                            key=lambda x: int(x.stem.split('_')[-1]))
+        if not batch_files:
+            print("ERROR: No batch files found")
+            sys.exit(1)
+
+        merge_db_files([str(f) for f in batch_files], str(output_file))
+        return output_file
     
     if not chunk_files:
         print("ERROR: No chunk files found")
@@ -251,57 +352,26 @@ def stage_merge_fingerprints():
     print(f"[Task {task_id}] Merging {len(my_chunks)} chunks into batch_{task_id}.h5")
     
     # Merge WITHOUT sorting (sorting is slow and done only once at the end)
-    merge_db_files([str(f) for f in my_chunks], str(batch_output), sort_by_popcnt=False)
+    merge_db_files([str(f) for f in my_chunks], str(batch_output))
     
     print(f"[Task {task_id}] Batch merge complete")
     
 
-def stage_merge_final(output_hdf: str | Path):
-    """Stage 4b: Merge all batches into final sorted database (single job)"""
-    
-    print("Merging batch files into final database...")
-    
-    MERGE_DIR = Path("tmp_merge_batches")
-    
-    if not MERGE_DIR.exists():
-        print("ERROR: Batch directory not found. Run merge_batches stage first.")
-        sys.exit(1)
-    
-    # Get all batch files
-    batch_files = sorted(MERGE_DIR.glob("batch_*.h5"),
-                        key=lambda x: int(x.stem.split('_')[-1]))
-    
-    if not batch_files:
-        print("ERROR: No batch files found")
-        sys.exit(1)
-    
-    print(f"Found {len(batch_files)} batch files")
-    
+def stage_final(output_hdf: str | Path, 
+                sort_by_popcnt: bool = True,
+                block_size: tuple[int, int, int, int] | None = None):
+    """Stage 5: Create index on final database and sort by population count (single job)"""
     # Check if final file already exists
-    if Path(output_hdf).exists():
-        print(f"Final database {output_hdf} already exists, skipping merge")
-        return 
+
+    print(f"Creating index on {output_hdf}...")
     
-    merge_db_files([str(f) for f in batch_files], str(output_hdf), sort_by_popcnt=True)
-    
+    create_index_on_existing_file(output_hdf, block_size=block_size)
+    print("Index created successfully!")
+
+    if sort_by_popcnt:
+        sort_db_file(output_hdf)
+        
     print(f"Fingerprint database created at {output_hdf}")
-    
-    # Clean up batch files
-    print("Cleaning up batch files...")
-    for batch_file in batch_files:
-        os.remove(batch_file)
-    
-    if MERGE_DIR.exists() and not any(MERGE_DIR.iterdir()):
-        MERGE_DIR.rmdir()
-    
-    # Clean up original chunks
-    TMP_DIR = Path("tmp_chunks")
-    if TMP_DIR.exists():
-        print("Cleaning up chunk files...")
-        for chunk_file in TMP_DIR.glob("chunk_*.h5"):
-            os.remove(chunk_file)
-        if not any(TMP_DIR.iterdir()):
-            TMP_DIR.rmdir()
 
 
 def main():
@@ -316,10 +386,10 @@ def main():
         stage_merge_smi(input_path, output_smi)
     elif stage == 'fingerprint':
         stage_create_fingerprints(output_smi, fp_type, fp_param)
-    elif stage == 'merge_batches':
-        stage_merge_fingerprints()
-    elif stage == 'merge_final':
-        stage_merge_final(output_hdf)
+    elif stage == 'merge_batches' or stage == 'merge_final':
+        stage_merge_fingerprints(final=(stage == 'merge_final'), output_hdf=output_hdf)
+    elif stage == 'sort' or stage == 'index':
+        stage_final(output_hdf, sort_by_popcnt=(stage == 'sort'))
     else:
         print(f"Unknown stage: {stage}")
         sys.exit(1)
