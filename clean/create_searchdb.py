@@ -18,6 +18,7 @@ import tables as tb
 import json
 import pyarrow.compute as pc
 import pyarrow as pa
+import shutil
 
 
 def parse_args():
@@ -375,7 +376,7 @@ def stage_final(output_hdf: str | Path,
 
 
 def main():
-    output_smi, input_path, batch_size, fp_param, fp_type, output_hdf, stage = parse_args()
+    output_smi, input_path, batch_size, fp_param, fp_type, output_hdf, stage, chunk_size = parse_args()
     RDLogger.DisableLog('rdApp.*')
     
     start = time.perf_counter()
