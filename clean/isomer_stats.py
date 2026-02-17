@@ -69,19 +69,24 @@ def compute_internal_duplication(
 def get_overlap_by_merge(db1: str, db2: str, 
                         db_paths: dict[str, str], 
                         smiles_col: str ="nostereo_SMILES",
-                        block_size: str = '64MB',
-                        on_disk: bool=False):
+                        block_size: str = '64MB'):
     
     df1 = dd.read_parquet(db_paths[db1], columns=[smiles_col], blocksize=block_size).drop_duplicates(subset=smiles_col)
     df2 = dd.read_parquet(db_paths[db2], columns=[smiles_col], blocksize=block_size).drop_duplicates(subset=smiles_col)
 
-    shuffle_method = "disk" if on_disk else "tasks"
-    overlap = dd.merge(df1, df2, on=smiles_col, how="inner", shuffle_method=shuffle_method)
+    # Concatenar y eliminar duplicados
+    combined = dd.read_parquet(db_paths[db1] + db_paths[db2]).drop_duplicates(subset=smiles_col)
     
-    over = overlap.map_partitions(len).sum().compute()
-    del df1, df2, overlap
+    # El número de duplicados = (size1 + size2) - tamaño_del_combinado_sin_duplicados
+    total_unique = combined.shape[0]
+    total_original = df1.shape[0] + df2.shape[0]
     
-    return over
+    over = total_original - total_unique
+    results = dask.compute(over)[0]
+    
+    del df1, df2, combined, over
+    
+    return results
 
 
 def get_pairwise_overlaps(
@@ -98,7 +103,7 @@ def get_pairwise_overlaps(
         #if isinstance(over, Path):
         #    overlaps[f"{db1}_{db2}"] = len(pd.read_parquet(over))
         overlaps[f"{db1}_{db2}"] = over
-        del over
+        
         
     return pd.Series(
         list(overlaps.values()),
