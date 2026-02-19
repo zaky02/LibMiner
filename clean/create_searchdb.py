@@ -33,8 +33,6 @@ def parse_args():
                         default={"radius": 2, "fpSize": 1024})
     parser.add_argument('-ft','--fp_type', type=str, help='Fingerprint type supported by FPSim2', required=False,
                         default="Morgan")
-    parser.add_argument('-oh', '--output_hdf', type=str, help='The output .h5 filename', 
-                        required=False, default='search_db.h5')
     parser.add_argument('-s', '--stage', type=str, choices=['convert', 'fingerprint', 'merge_smi', 'merge_batches', 'merge_final', "index", "sort"], help='Processing stage', required=True)
 
     args = parser.parse_args()
@@ -159,28 +157,34 @@ def stage_merge_smi(input_path: str | Path, output_smi: str | Path):
     print(f"SMILES file created at {output_smi}")
 
 
-def create_index_on_existing_file(db_file: str | Path, 
-                                  tmp_dir: str = None, 
-                                  block_size: tuple[int, int, int, int] = None):
+def create_index_on_existing_file(batch_output: Path | str, 
+                                  tmp_dir: str = None):
     """Create index on an existing PyTables file."""
+
+    if not Path(batch_output).exists():
+        print(f"{batch_output} doesn't exists")
+        return
+    
     if tmp_dir is None:
         tmp_dir = Path(db_file).parent / Path(db_file).stem + "_tmp_index"
         tmp_dir.mkdir(exist_ok=True)
         
-    with tb.open_file(db_file, mode="a") as f:  # ← "a" for append/modify
+    with tb.open_file(batch_output, mode="a") as f:  # ← "a" for append/modify
         # Check if index already exists
         if f.root.fps.cols.popcnt.is_indexed:
-            print(f"Index already exists on {db_file}")
+            print(f"Index already exists on {batch_output}")
             return
         
-        print(f"Creating index on {db_file}...")
-        f.root.fps.cols.popcnt.create_index(
-            kind="full",
-            tmp_dir=tmp_dir,
-            _blocksizes=block_size
+        print(f"Creating index on {batch_output}...")
+        f.root.fps.cols.popcnt.create_csindex(
+            tmp_dir=str(tmp_dir)
         )
+        
         print("Index created successfully!")
-
+        
+        # Clean up temp directory
+    if tmp_dir.exists() and not any(tmp_dir.iterdir()):
+        tmp_dir.rmdir()
 
 def merge_db_files(
     input_files: list[str], output_file: str
@@ -315,7 +319,7 @@ def stage_merge_fingerprints(final: bool = False,
     array_size = int(os.environ.get('SLURM_ARRAY_TASK_COUNT', 1))
         
     TMP_DIR = Path("tmp_chunks")
-    MERGE_DIR = Path("tmp_merge_batches")
+    MERGE_DIR = Path(f"{input_path}") / "merged_batches"
     MERGE_DIR.mkdir(exist_ok=True)
     # We need to know how many chunks were created
     chunk_files = sorted(TMP_DIR.glob("chunk_*.h5"), 
@@ -358,21 +362,23 @@ def stage_merge_fingerprints(final: bool = False,
     print(f"[Task {task_id}] Batch merge complete")
     
 
-def stage_final(output_hdf: str | Path, 
-                sort_by_popcnt: bool = True,
-                block_size: tuple[int, int, int, int] | None = None):
+def stage_final(input_path: str | Path = "Molecular_database", sort_by_popcnt: bool = False):
     """Stage 5: Create index on final database and sort by population count (single job)"""
+    
+    task_id = int(os.environ.get('SLURM_ARRAY_TASK_ID', 0))
+    MERGE_DIR = Path(f"{input_path}") / "merged_batches"
+    batch_output = MERGE_DIR / f"batch_{task_id}.h5"
     # Check if final file already exists
 
     print(f"Creating index on {output_hdf}...")
     
-    create_index_on_existing_file(output_hdf, block_size=block_size)
+    create_index_on_existing_file(batch_output)
     print("Index created successfully!")
 
     if sort_by_popcnt:
-        sort_db_file(output_hdf)
+        sort_db_file(str(batch_output))
         
-    print(f"Fingerprint database created at {output_hdf}")
+    print(f"Fingerprint database created at {batch_output}")
 
 
 def main():
@@ -390,7 +396,8 @@ def main():
     elif stage == 'merge_batches' or stage == 'merge_final':
         stage_merge_fingerprints(final=(stage == 'merge_final'), output_hdf=output_hdf)
     elif stage == 'sort' or stage == 'index':
-        stage_final(output_hdf, sort_by_popcnt=(stage == 'sort'))
+        #stage_final(output_hdf, sort_by_popcnt=(stage == 'sort'))
+        stage_final(sort_by_popcnt=(stage == 'sort'))
     else:
         print(f"Unknown stage: {stage}")
         sys.exit(1)
