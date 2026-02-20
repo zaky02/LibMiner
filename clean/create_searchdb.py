@@ -186,6 +186,7 @@ def create_index_on_existing_file(batch_output: Path | str,
     if tmp_dir.exists() and not any(tmp_dir.iterdir()):
         tmp_dir.rmdir()
 
+
 def merge_db_files(
     input_files: list[str], output_file: str
 ) -> None:
@@ -319,7 +320,7 @@ def stage_merge_fingerprints(final: bool = False,
     array_size = int(os.environ.get('SLURM_ARRAY_TASK_COUNT', 1))
         
     TMP_DIR = Path("tmp_chunks")
-    MERGE_DIR = Path(f"{input_path}") / "merged_batches"
+    MERGE_DIR = Path(output_path)
     MERGE_DIR.mkdir(exist_ok=True)
     # We need to know how many chunks were created
     chunk_files = sorted(TMP_DIR.glob("chunk_*.h5"), 
@@ -362,18 +363,19 @@ def stage_merge_fingerprints(final: bool = False,
     print(f"[Task {task_id}] Batch merge complete")
     
 
-def stage_final(input_path: str | Path = "Molecular_database", sort_by_popcnt: bool = False):
+def stage_final(output_path: str | Path = "Molecular_database/search_db", sort_by_popcnt: bool = False):
     """Stage 5: Create index on final database and sort by population count (single job)"""
     
     task_id = int(os.environ.get('SLURM_ARRAY_TASK_ID', 0))
-    MERGE_DIR = Path(f"{input_path}") / "merged_batches"
+    MERGE_DIR = Path(output_path)
     batch_output = MERGE_DIR / f"batch_{task_id}.h5"
     # Check if final file already exists
 
     print(f"Creating index on {output_hdf}...")
     
-    create_index_on_existing_file(batch_output)
-    print("Index created successfully!")
+    if not sort_by_popcnt:
+        create_index_on_existing_file(batch_output)
+        print("Index created successfully!")
 
     if sort_by_popcnt:
         sort_db_file(str(batch_output))
@@ -382,7 +384,7 @@ def stage_final(input_path: str | Path = "Molecular_database", sort_by_popcnt: b
 
 
 def main():
-    output_smi, input_path, batch_size, fp_param, fp_type, output_hdf, stage, chunk_size = parse_args()
+    output_smi, input_path, batch_size, fp_param, fp_type, stage, output_searchdb = parse_args()
     RDLogger.DisableLog('rdApp.*')
     
     start = time.perf_counter()
@@ -397,7 +399,7 @@ def main():
         stage_merge_fingerprints(final=(stage == 'merge_final'), output_hdf=output_hdf)
     elif stage == 'sort' or stage == 'index':
         #stage_final(output_hdf, sort_by_popcnt=(stage == 'sort'))
-        stage_final(sort_by_popcnt=(stage == 'sort'))
+        stage_final(output_searchdb, sort_by_popcnt=(stage == 'sort'))
     else:
         print(f"Unknown stage: {stage}")
         sys.exit(1)
