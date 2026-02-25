@@ -8,14 +8,18 @@ from dataclasses import dataclass, field
 from typing import Sequence
 from utils import convert_hac_to_mw, convert_mw_to_hac
 from functools import partial
+from collections import defaultdict
 import datamol as dm
 import json
+import os
+import gc
+import pickle as pk
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Search similar SMILES')
-    parser.add_argument('-db', '--db_name', type=str, help='the name of the FPSIM2 fingerprint database',  required=True)
-    parser.add_argument('-m','--molecular_database', type=str, help='The folder path for the analogous search database', required=True, default='Molecular_database/deduplicate_nostereo')
+    parser.add_argument('db_name', type=str, help='the name of the FPSIM2 fingerprint database',  required=True)
+    parser.add_argument('-m','--molecular_database', type=str, help='The folder path for the database where the similes without stereoisomer information is stored', required=True, default='Molecular_database/deduplicate_nostereo')
     parser.add_argument('-ms','--original_database', type=str, help='The folder path for the original database', required=True, default='Molecular_database/deduplicate_canonical')
     parser.add_argument('-q','--query_path', type=str, help='File for the query in .smi format', required=True)
     parser.add_argument('-k','--top_k', type=int, help='How many molecular to retrieve (it might return less because of the algorithm)', required=False, default=500)
@@ -33,9 +37,9 @@ def parse_args():
     parser.add_argument('-db', '--db_id', type=json.loads, 
                         help='Dictionary mapping commercial database names to their IDs', required=False, 
                         default={"enamine": "001", "wuxi": "014", "mcule": "006", "molport": "013"})
-    
+    parser.add_argument("-s", "--stage", choices=("search", "retrieve"), default="search", help="Runing search or retrieve")
     args = parser.parse_args()
-    return args.db_name, args.molecular_database, args.index_file, args.top_k, args.threshold, args.num_workers, args.output_file, args.query_path, args.on_disk, args.hac_limits, args.mw_range, args.search_type, args.original_database, args.commercially_avaliable, args.commercial_databases, args.pairwise_database, args.db_id
+    return args.db_name, args.molecular_database, args.index_file, args.top_k, args.threshold, args.num_workers, args.output_file, args.query_path, args.on_disk, args.hac_limits, args.mw_range, args.search_type, args.original_database, args.commercially_avaliable, args.commercial_databases, args.pairwise_database, args.db_id, args.stage
 
 
 @dataclass
@@ -70,9 +74,8 @@ class FPSim2Query:
         
         for que in self.queries:
             results = method(que, top_k=top_k, threshold=threshold, n_workers=self.workers)
-            search[que] = [int(x[0]) for x in results]
-            tanimoto[que] = pd.Series({int(x[0]): float(x[1]) for x in results}).rename("Tanimoto")
-        return search, tanimoto
+            search[que] = results
+        return search
 
     def substructure_screenout(
         self):
@@ -89,23 +92,7 @@ class FPSim2Query:
             results = method(que, n_workers=self.workers)
             search[que] = [int(x[0]) for x in results]
 
-        return search, None
-    
-    def _match_smiles(self, smi: str, query_mol: dm.Mol) -> bool:
-        mol = dm.to_mol(smi)
-        return mol.HasSubstructMatch(query_mol)
-    
-    def match_substructure(self,
-                           df_dict: dict[str, pd.DataFrame],
-                           ) -> dict[str, pd.DataFrame]:
-        """Perform substructure matching to filter false positives"""
-        subs = {}
-        for que in self.queries:
-            query_mol = dm.to_mol(que)
-            mask = dm.parallelized(partial(self._match_smiles, query_mol=query_mol), df_dict[que]["SMILES"], n_jobs=self.workers, progress=False, scheduler="threads")
-            subs[que] = df_dict[que][mask]
-            
-        return subs
+        return search
 
 
 @dataclass
@@ -225,8 +212,12 @@ class RetrieveSmiles:
         db_con = duckdb.connect()   
         res = self.retrieve_smiles(db_con, sorted(index), list(parquet))
         for query, index in index_dict.items():
-            dat = res[res["num_ID"].isin(index)].drop(["num_ID"], axis=1)
-            result[query] = pd.concat([dat, more_data[query]], axis=1) if more_data is not None else dat
+            dat = res[res["num_ID"].isin(index)]
+            if more_data is not None:
+                coef = more_data[query]
+                filt_coef = coef[coef.index.isin(dat["num_ID"])]
+                dat = pd.concat([dat, filt_coef], axis=1)
+            result[query] = dat
             
         db_con.close()
         return result
@@ -445,27 +436,96 @@ class IsomerRetriever:
         return result
 
 
+def _match_smiles(smi: str, query_mol: dm.Mol) -> bool:
+    mol = dm.to_mol(smi)
+    return mol.HasSubstructMatch(query_mol)
+
+def match_substructure(queries: str | list[str],
+                        df_dict: dict[str, pd.DataFrame],
+                        workers: int = 4
+                        ) -> dict[str, pd.DataFrame]:
+    """Perform substructure matching to filter false positives"""
+    subs = {}
+    if isinstance(queries, str):
+        queries = [queries]
+    for que in queries:
+        query_mol = dm.to_mol(que)
+        mask = dm.parallelized(partial(_match_smiles, query_mol=query_mol), 
+                               df_dict[que]["SMILES"], n_jobs=workers, 
+                               progress=False, scheduler="threads")
+        
+        subs[que] = df_dict[que][mask]
+        
+    return subs
+
+
+def process_query_by_db(db_name: str, query: str | list[str], 
+                        num_workers: int=50, 
+                        on_disk: bool = True, 
+                        top_k: int =100, 
+                        threshold: float = 0.7, 
+                        search_type: str = "similarity"):
+    
+    task_id = int(os.environ.get('SLURM_ARRAY_TASK_ID', 0))
+    array_size = int(os.environ.get('SLURM_ARRAY_TASK_COUNT', 1))
+    
+    my_chunk = list(Path(db_name).glob("*.h5"))[task_id::array_size]
+    outpath = Path("search_results")
+    outpath.mkdir(exist_ok=True)
+    
+    for db in my_chunk:
+        db_task = int(db.stem.split('_')[-1]) 
+        fp = FPSim2Query(query=query, db_name=db, workers=num_workers, on_disk=on_disk)
+        search = {"similarity": partial(fp.similarity_search, top_k=top_k, threshold=threshold), 
+                "substructure": fp.substructure_screenout}    
+        
+        search_results = search[search_type]()
+        with open(f"{outpath}/search_{db_task}.pkl", "wb") as js:
+            pk.dump(search_results, js)
+        
+        del fp; gc.collect()
+
+def read_search_results(top_k: int = 100, 
+                        search_type: str = "similarity") -> dict[str, list[tuple[int, int]]]:
+    outpath = Path("search_results")
+    if not outpath.exists():
+        raise FileNotFoundError("The folder for the search results doesn't exists, check the folder")
+    
+    search_results = defaultdict(list)
+    for x in outpath.glob("*.pkl"):
+        with open(x, "rb") as js:
+            res = pk.load(js) # A dictionary of {query: search results}
+        for query, item in res.items():
+            search_results[query].extend(item)
+    if search_type == "similarity":
+        return {query: sorted(item, key=lambda x: x[2], reverse=True)[:top_k]}
+    
+    return {query: sorted(item)}
+
 def main():
-    db_name, molecular_database, index_file, top_k, threshold, num_workers, output_file, query_path, on_disk,hac_limits, mw_range, search_type, original_database, commercially_avaliable, commercial_databases, pairwise_database, db_id = parse_args()
+    db_name, molecular_database, index_file, top_k, threshold, num_workers, output_file, query_path, on_disk,hac_limits, mw_range, search_type, original_database, commercially_avaliable, commercial_databases, pairwise_database, db_id, stage = parse_args()
    
     with open(query_path) as w:
         query = [x.strip() for x in w.readlines()]
-    fp = FPSim2Query(query=query, db_name=db_name, workers=num_workers, on_disk=on_disk)
-    search = {"similarity": partial(fp.similarity_search, top_k=top_k, threshold=threshold), 
-              "substructure": fp.substructure_screenout}    
-    
-    search_results, tanimoto = search[search_type]()
-    
-    retrieve = RetrieveSmiles(index_file, molecular_database, mw_range, hac_limits)
-    smiles = retrieve.run(search_results, more_data=tanimoto)
-    if search_type == "substructure":
-        smiles = fp.match_substructure(smiles)
-    retrieve_isomers = IsomerRetriever(original_database, pairwise_database, commercially_avaliable, commercial_databases, db_id)
-    
-    smiles = retrieve_isomers.retrieve_batch(smiles)
-    Path(output_file).parents.mkdir(parents=True, exist_ok=True)
-    pd.concat(smiles).to_csv(output_file)
-    
+        
+    match stage:    
+        case "search":
+            process_query_by_db(db_name, query, num_workers, on_disk, top_k, threshold, search_type)
+            
+        case "retrieve": 
+            search_results = read_search_results(top_k, search_type)
+            retrieve = RetrieveSmiles(index_file, molecular_database, mw_range, hac_limits)
+            smiles = retrieve.run(search_results)
+            if search_type == "substructure":
+                smiles = match_substructure(smiles)
+            retrieve_isomers = IsomerRetriever(original_database, pairwise_database, commercially_avaliable, commercial_databases, db_id)
+            
+            smiles = retrieve_isomers.retrieve_batch(smiles)
+            Path(output_file).parents.mkdir(parents=True, exist_ok=True)
+            pd.concat(smiles).to_csv(output_file)
+            
+        case _:
+            raise NotImplemented("Unknown stage")
     
 if __name__ == "__main__":
     # Run this if this file is executed from command line but not if is imported as API
