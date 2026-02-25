@@ -21,6 +21,7 @@ from dask.distributed import Client, performance_report
 import pandas as pd
 import gc
 import json
+from itertools import pairwise
 
 
 def parse_args():
@@ -178,14 +179,18 @@ def main():
                 f.write(f"HAC {hac} done\n")
                 
             with open(stats, "a") as w:
-                w.write(f"HAC {hac}# {count}\n")
+                w.write(f"HAC {hac}# {current_offset}\n") # the index should be the count or length of the HAC + current offset
             
         end = time.perf_counter()
         print(f"Initial cleaning completed in {end - start:.2f} seconds")    
-   
+
         with open(stats, "r") as st:
-            lines = pd.Series({int(x.split("#")[0].strip("HAC")): 
-                     int(x.strip().split("#")[-1]) for x in st.readlines()})
+            hac = [int(x.strip().split("#")[-1]) for x in st.readlines()]
+            count = [int(x.split("#")[0].strip("HAC")) for x in st.readlines()]
+            num = [count[0]]
+            for x in pairwise(count):
+                num.append(x[1]- x[0])
+            lines = pd.Series(dict(zip(hac, num)))
             lines.to_csv(out_path/"dedup_counts.csv")
             
 if __name__ == "__main__":
