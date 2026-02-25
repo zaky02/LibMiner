@@ -74,7 +74,7 @@ class FPSim2Query:
         
         for que in self.queries:
             results = method(que, top_k=top_k, threshold=threshold, n_workers=self.workers)
-            search[que] = results
+            search[que] = [(int(x["mol_id"]), float(x["coeff"])) for x in results]
         return search
 
     def substructure_screenout(
@@ -90,7 +90,7 @@ class FPSim2Query:
         )
         for que in self.queries:
             results = method(que, n_workers=self.workers)
-            search[que] = [int(x[0]) for x in results]
+            search[que] = [int(x) for x in results]
 
         return search
 
@@ -158,7 +158,7 @@ class RetrieveSmiles:
         index_dict = {}
         bounds = np.array(sorted(lines.keys()))
         for query, result in search_results.items():
-            index = sorted(result)
+            index = sorted([x for x in result[0]])
             i = np.unique(np.searchsorted(bounds, index, side="right"))
             hacs = [lines.get(x) for x in bounds[i]]
             index_dict[query] = hacs
@@ -189,34 +189,41 @@ class RetrieveSmiles:
 
     def batch_retrieve(
         self,
-        search_result: dict[str, list[int]], 
+        search_result: dict[str, list[tuple[int, int]]], 
         parquet_paths: dict[str, list[str]],
-        more_data: dict[str, pd.Series] | None = None,
+        search_type: str ="similarity"
         ) -> dict[str, pd.DataFrame]:
         
         #extract the index from the FPSIM2 results and generate the combined path and indices
         """
         Batch retrieve SMILES and db_id from the database using the results of FPSIM2 search and the parquet file paths
         """
-
-        index_dict = {query: sorted(ind) for query, ind in search_result.items()}
+        if search_type == "similarity":
+            index = set([mol_id[0] for ind in search_result.values() for mol_id in ind])
+        else:
+            index = set([mol_id for ind in search_result.values() for mol_id in ind])
+        
         parquet = set()
-        index = set()
         for i in parquet_paths.values():
             parquet.update(i)
-        for i in index_dict.values():
-            index.update(i)
-            
+             
         result = {}
         # connect to database and search using the combined indices and parquet files
         db_con = duckdb.connect()   
         res = self.retrieve_smiles(db_con, sorted(index), list(parquet))
-        for query, index in index_dict.items():
-            dat = res[res["num_ID"].isin(index)]
-            if more_data is not None:
-                coef = more_data[query]
-                filt_coef = coef[coef.index.isin(dat["num_ID"])]
-                dat = pd.concat([dat, filt_coef], axis=1)
+        for query, index in search_result.items():
+            if search_type == "substructure":
+                dat = res[res["num_ID"].isin(index)]
+                result[query] = dat
+                
+            else:
+                index = pd.DataFrame(index)
+                index.columns = ["mol_id", "Tanimoto"]
+                index.set_index("mol_id", inplace=True)
+                dat = res[res["num_ID"].isin(index.index)]
+                coeff = index.loc[dat["num_ID"]]["Tanimoto"]
+                dat = pd.concat([dat, coeff], axis=1)
+                
             result[query] = dat
             
         db_con.close()
@@ -224,14 +231,14 @@ class RetrieveSmiles:
     
     def run(self, 
         search_results: dict[str, list[int]],
-        more_data: dict[str, pd.Series] | None = None,
+        search_type: str ="similarity"
         ) -> pd.DataFrame:
         """
         A convenient function to run the similarity search
         """
         hac_dict = self.find_hac_by_index(search_results)
         parquet_paths = self.convert_hac_topath(hac_dict)
-        smiles = self.batch_retrieve(search_results, parquet_paths, more_data)
+        smiles = self.batch_retrieve(search_results, parquet_paths, search_type)
         return smiles
 
 
@@ -477,13 +484,14 @@ def process_query_by_db(db_name: str, query: str | list[str],
         db_task = int(db.stem.split('_')[-1]) 
         fp = FPSim2Query(query=query, db_name=db, workers=num_workers, on_disk=on_disk)
         search = {"similarity": partial(fp.similarity_search, top_k=top_k, threshold=threshold), 
-                "substructure": fp.substructure_screenout}    
+                  "substructure": fp.substructure_screenout}    
         
         search_results = search[search_type]()
         with open(f"{outpath}/search_{db_task}.pkl", "wb") as js:
             pk.dump(search_results, js)
         
         del fp; gc.collect()
+
 
 def read_search_results(top_k: int = 100, 
                         search_type: str = "similarity") -> dict[str, list[tuple[int, int]]]:
@@ -502,6 +510,7 @@ def read_search_results(top_k: int = 100,
     
     return {query: sorted(item)}
 
+
 def main():
     db_name, molecular_database, index_file, top_k, threshold, num_workers, output_file, query_path, on_disk,hac_limits, mw_range, search_type, original_database, commercially_avaliable, commercial_databases, pairwise_database, db_id, stage = parse_args()
    
@@ -515,10 +524,12 @@ def main():
         case "retrieve": 
             search_results = read_search_results(top_k, search_type)
             retrieve = RetrieveSmiles(index_file, molecular_database, mw_range, hac_limits)
-            smiles = retrieve.run(search_results)
+            smiles = retrieve.run(search_results, search_type)
             if search_type == "substructure":
-                smiles = match_substructure(smiles)
-            retrieve_isomers = IsomerRetriever(original_database, pairwise_database, commercially_avaliable, commercial_databases, db_id)
+                smiles = match_substructure(query, smiles, num_workers)
+            retrieve_isomers = IsomerRetriever(original_database, pairwise_database, 
+                                               commercially_avaliable, 
+                                               commercial_databases, db_id)
             
             smiles = retrieve_isomers.retrieve_batch(smiles)
             Path(output_file).parents.mkdir(parents=True, exist_ok=True)
