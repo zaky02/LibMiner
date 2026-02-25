@@ -177,6 +177,10 @@ def create_index_on_existing_file(batch_output: Path | str,
             print(f"Index already exists on {batch_output}")
             return
         
+        if tmp_dir is None:
+            tmp_dir = Path(batch_output.stem + "_index")
+            tmp_dir.mkdir(exist_ok=True)
+        
         print(f"Creating index on {batch_output}...")
         f.root.fps.cols.popcnt.create_csindex(
             tmp_dir=str(tmp_dir)
