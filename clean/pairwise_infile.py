@@ -39,7 +39,7 @@ def export_smiles_unsorted(
 
     Returns the original row count (before any deduplication).
     """
-    logger.info(f"Exporting SMILES from {db_path}")
+    logger.info(f"Exporting SMILES")
     df = dd.read_parquet(db_path, columns=[smiles_col], blocksize=block_size).dropna()
 
     df[[smiles_col]].to_csv(
@@ -77,7 +77,7 @@ def sort_file(
     
     logger.info(f"Sorting {input_file.name} → {output_file.name}")
     subprocess.run(
-        ["LC_ALL=C sort", "-u",
+        ["sort", "-u",
             "-S", buffer_size,
             "--parallel", str(parallel),
             "-T", str(temp_dir),
@@ -94,7 +94,6 @@ def sort_file(
     unique_count = int(result.stdout.split()[0])
     logger.info(f"  {unique_count:,} unique lines after sort -u")
     return unique_count
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Step 2: single-pass k-way merge → pairwise counts + parquet
@@ -123,7 +122,7 @@ def kway_merge_to_parquet(
     Parquet schema
     ──────────────
     SMILES       string   — the molecule
-    Databases    string   — comma-separated sorted db_ids  e.g. "003,007,012"
+    db_ids    string   — comma-separated sorted db_ids  e.g. "003,007,012"
     n_databases  int32    — number of databases containing this SMILES
     """
     logger.info(
@@ -132,7 +131,7 @@ def kway_merge_to_parquet(
 
     schema = pa.schema([
         pa.field("SMILES",      pa.string()),
-        pa.field("Databases",   pa.string()),
+        pa.field("db_ids",   pa.string()),
         pa.field("n_databases", pa.int32()),
     ])
     writer = pq.ParquetWriter(output_parquet, schema)
@@ -140,7 +139,7 @@ def kway_merge_to_parquet(
     def flush(rows: list[dict]) -> None:
         writer.write_table(
             pa.Table.from_pandas(
-                pd.DataFrame(rows, columns=["SMILES", "Databases", "n_databases"]),
+                pd.DataFrame(rows, columns=["SMILES", "db_ids", "n_databases"]),
                 schema=schema,
             )
         )
@@ -209,7 +208,7 @@ def kway_merge_to_parquet(
         dbs_sorted = sorted(current_dbs)
         buffer.append({
             "SMILES":      current_smiles,
-            "Databases":   ",".join(dbs_sorted),
+            "db_ids":   ",".join(dbs_sorted),
             "n_databases": len(dbs_sorted),
         })
         total_redundant += 1
@@ -256,7 +255,7 @@ def compute_pairwise_overlaps(
     """
     work_dir = Path(work_dir)
     temp_dir = work_dir / "sort_temp"
-    temp_dir.mkdir(exist_ok=True)
+    temp_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info("=" * 80)
     logger.info("STEP 1 — Export (original counts) & sort -u (unique counts)")
@@ -386,13 +385,15 @@ if __name__ == "__main__":
             print(f"HAC {hac} already done, skipping.")     
             continue
         
-        db_paths = convert_folder(hac_folder) 
-        output_parquet = work_dir / hac / args.output
-        output_parquet = Path(output_parquet)
-        
+        db_paths = convert_folder(hac_folder)
+        output_hac = work_dir / hac
+        output_hac.mkdir(parents=True, exist_ok=True) 
+        output_parquet = output_hac / args.output
+    
+
         pair_counts, original_counts, unique_counts, db_sorted_files =  compute_pairwise_overlaps(
                                                                         db_paths= db_paths,
-                                                                        work_dir= work_dir,
+                                                                        work_dir= output_hac,
                                                                         output_parquet= output_parquet,
                                                                         smiles_col= args.smiles_col,
                                                                         block_size= args.block_size,

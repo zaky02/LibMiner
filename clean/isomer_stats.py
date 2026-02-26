@@ -73,7 +73,6 @@ def get_overlap_by_merge(db1: str, db2: str,
     
     df1 = dd.read_parquet(db_paths[db1], columns=[smiles_col], blocksize=block_size).drop_duplicates(subset=smiles_col)
     df2 = dd.read_parquet(db_paths[db2], columns=[smiles_col], blocksize=block_size).drop_duplicates(subset=smiles_col)
-
     # Concatenar y eliminar duplicados
     combined = dd.read_parquet(db_paths[db1] + db_paths[db2]).drop_duplicates(subset=smiles_col)
     
@@ -93,17 +92,15 @@ def get_pairwise_overlaps(
     db_paths: dict[str, str],
     smiles_col: str ="nostereo_SMILES",
     block_size: str = "64MB",
-    on_disk: bool=False
     ):
     
     overlaps={}
     pairs = [sorted(x) for x in combinations(db_paths.keys(), 2)]
     for db1, db2 in pairs:  # run n bacthes at a time
-        over = get_overlap_by_merge(db1, db2, db_paths, smiles_col, block_size, on_disk)
+        over = get_overlap_by_merge(db1, db2, db_paths, smiles_col, block_size)
         #if isinstance(over, Path):
         #    overlaps[f"{db1}_{db2}"] = len(pd.read_parquet(over))
         overlaps[f"{db1}_{db2}"] = over
-        
         
     return pd.Series(
         list(overlaps.values()),
@@ -124,21 +121,13 @@ def main():
         hacs = sorted(database_path.glob("HAC_*"), key=lambda x: int(x.name.split("_")[-1]))
             
         logger.info(f"start isomer deduplication: {database_path}")
-        size_limit = 30 * (1024 ** 3)   # 50 GB
+        batch_size = 3
         for hac_folders in hacs:
             hac = hac_folders.name.split("_")[-1]
         
             if f"HAC {hac} done" in progress.read_text():
                 print(f"HAC {hac} already done, skipping.")     
                 continue
-            
-            ## look at the file size to decide if on disk or not
-            file_sizes = sum([p.stat().st_size for p in hac_folders.glob("*.parquet")])
-            batch_size = 4
-            on_disk = False
-            if file_sizes >= size_limit:
-                batch_size = 1
-                on_disk=True
                 
             out_parq = output_stats / hac 
             out_parq.mkdir(parents=True, exist_ok=True)
@@ -148,7 +137,7 @@ def main():
             internal_counts = compute_internal_duplication(classified_folders, smiles_col, block_size, batch_size)
             
             logger.info(f"computing database redundancy {hac}")
-            overlaps = get_pairwise_overlaps(classified_folders, smiles_col,block_size, on_disk)
+            overlaps = get_pairwise_overlaps(classified_folders, smiles_col, block_size)
             internal_counts.to_csv(output_stats/hac/"internal_duplication.csv")
             overlaps.to_csv(output_stats/hac/"pairwise_duplication.csv")
 
