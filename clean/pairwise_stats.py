@@ -107,15 +107,14 @@ def get_overlap_by_merge(db1: str, db2: str,
     # Use the merge and let Dask manage the partitioning/shuffle
     # If len(df1) and len(df2) are both large, this is the most Dask-idiomatic way.
     # The 'on_disk' flag already handles the memory spill.
-    
-    shuffle_method = "disk" # if on_disk else "tasks"
+    shuffle_method = "disk" if on_disk else "tasks"
     overlap = dd.merge(df1, df2, on=smiles_col, how="inner", shuffle_method=shuffle_method)
-
+    
     if on_disk:
         overlap.to_parquet(out_dir, write_index=False, compute=True)
         print(f"💾 Overlap of {db1} and {db2} saved to disk at {out_dir}")
-        return out_dir
-    del df1, df2
+        return out_dir / "*.parquet"
+    
     client.run(gc.collect)
     return overlap # Returns a Dask DataFrame, not computed!
 
@@ -146,7 +145,7 @@ def count_reundancy(
     smiles_to_dbs = defaultdict(set)  
     for pair, df in overlaps.items():
         db1, db2 = pair.split("_")
-        if isinstance(df, Path):
+        if isinstance(df, (Path, str)):
             df = dd.read_parquet(df, columns=[smiles_col])                 
         sm = df[smiles_col].compute()
         overlap_counts[pair] = len(sm)
