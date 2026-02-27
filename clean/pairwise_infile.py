@@ -183,7 +183,7 @@ def kway_merge_to_parquet(
                 dbs_sorted = sorted(current_dbs)
                 buffer.append({
                     "SMILES":      current_smiles,
-                    "Databases":   ",".join(dbs_sorted),
+                    "db_ids":   ",".join(dbs_sorted),
                     "n_databases": len(dbs_sorted),
                 })
                 total_redundant += 1
