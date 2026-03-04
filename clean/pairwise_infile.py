@@ -256,6 +256,8 @@ def compute_pairwise_overlaps(
     work_dir = Path(work_dir)
     temp_dir = work_dir / "sort_temp"
     temp_dir.mkdir(parents=True, exist_ok=True)
+    work_stats = work_dir / "finished.txt"
+    work_stats.touch(exist_ok=True)
 
     logger.info("=" * 80)
     logger.info("STEP 1 — Export (original counts) & sort -u (unique counts)")
@@ -264,41 +266,43 @@ def compute_pairwise_overlaps(
     db_sorted_files: dict[str, Path] = {}
     original_counts: dict[str, int]  = {}
     unique_counts:   dict[str, int]  = {}
-
+    
+    with open(work_stats) as f:
+        lines = f.read_lines()
+        for l in lines:
+            db_id, file, num = l.split(":")
+            if "unsorted" in file:
+                original_counts[db_id] = int(num)
+            elif "_sorted" in file:
+                unique_counts[db_id] = int(num)
+                
     for db_id, db_path in sorted(db_paths.items()):
         sorted_file   = work_dir / f"db_{db_id}_sorted.txt"
         unsorted_file = work_dir / f"db_{db_id}_unsorted.txt"
 
-        if sorted_file.exists():
+        if db_id not in original_counts:
             # sorted file exists — reuse it but we still need the original count
-            result = subprocess.run(
-                ["wc", "-l", str(sorted_file)],
-                check=True, capture_output=True, text=True,
-            )
-            unique_n = int(result.stdout.split()[0])
-            logger.info(
-                f"{db_id}: reusing sorted file ({unique_n:,} unique lines). "
-                f"Re-reading parquet for original count …"
-            )
-            # original count: fast metadata read, no full scan
-            original_n = dd.read_parquet(
-                db_path, columns=[smiles_col], blocksize=block_size
-            )[smiles_col].count().compute()
-        else:
             original_n = export_smiles_unsorted(
                 db_path, unsorted_file, smiles_col, block_size
             )
+            
+            original_counts[db_id]  = original_n
+            
+            with open(work_stats, "a") as f:
+                f.write(f"{db_id}:{unsorted_file}:{original_n}")
+        
+        if db_id not in unique_counts:
             unique_n = sort_file(
                 unsorted_file, sorted_file, temp_dir, sort_buffer, sort_parallel
             )
+        
+            with open(work_stats, "a") as f:
+                f.write(f"{db_id}:{sorted_file}:{unique_n}")
+            
+            unique_counts[db_id] = unique_n
+            
             unsorted_file.unlink()
-            logger.info(
-                f"{db_id}: original={original_n:,}  unique={unique_n:,}  "
-                f"internal_duplicates={original_n - unique_n:,}"
-            )
-
-        original_counts[db_id]  = original_n
-        unique_counts[db_id]    = unique_n
+         
         db_sorted_files[db_id]  = sorted_file
 
     if temp_dir.exists():
