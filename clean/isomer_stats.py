@@ -36,7 +36,6 @@ def compute_internal_duplication(
     db_paths: dict[str, str],
     smiles_cols: str = "nostereo_SMILES",
     block_size: str = '64MB',
-    batch_size: int = 2,
 ):
     """
     Compute internal deduplication statistics for many databases in smaller batches.
@@ -47,21 +46,12 @@ def compute_internal_duplication(
     # Convert items to a list so we can slice batches
     db_items = list(db_paths.items())
 
-    for i in range(0, len(db_items), batch_size):
-        batch = db_items[i : i + batch_size]
-        lazy_results = []
-
-        # Build each batch of Dask operations
-        for db_id, path in batch:
-            df = dd.read_parquet(path, columns=[smiles_cols], blocksize=block_size)
-            # El drop ID nunca debe hacerse en el pairwise
-            df_dedup = df.drop_duplicates(subset=smiles_cols)
-            unique = df_dedup.map_partitions(len).sum()
-            lazy_results.append(unique)
-
-        # Compute this batch in one go
-        computed_values = dask.compute(*lazy_results)
-        counts.update(dict(zip([db_id for db_id, _ in batch], computed_values)))
+    for db_id, path in db_items:
+        df = dd.read_parquet(path, columns=[smiles_cols], blocksize=block_size)
+        # El drop ID nunca debe hacerse en el pairwise
+        df_dedup = df.drop_duplicates(subset=smiles_cols)
+        unique = df_dedup.map_partitions(len).sum()
+        counts[db_id] = unique.compute()
 
     return pd.Series(counts, name="after_internal_deduplication")
 
@@ -77,13 +67,11 @@ def get_overlap_by_merge(db1: str, db2: str,
     combined = dd.read_parquet(db_paths[db1] + db_paths[db2]).drop_duplicates(subset=smiles_col)
     
     # El número de duplicados = (size1 + size2) - tamaño_del_combinado_sin_duplicados
-    total_unique = combined.shape[0]
-    total_original = df1.shape[0] + df2.shape[0]
-    
-    over = total_original - total_unique
-    results = dask.compute(over)[0]
-    
-    del df1, df2, combined, over
+    total_unique = combined.shape[0].compute()
+    total_original = df1.shape[0].compute() + df2.shape[0].compute()
+
+    results = total_original - total_unique
+    del df1, df2, combined
     
     return results
 
@@ -105,7 +93,7 @@ def get_pairwise_overlaps(
     return pd.Series(
         list(overlaps.values()),
         index=overlaps.keys(),
-        name="after_pairswise_deduplication"
+        name="pairswise_overlaps"
     )
 
 
@@ -121,7 +109,6 @@ def main():
         hacs = sorted(database_path.glob("HAC_*"), key=lambda x: int(x.name.split("_")[-1]))
             
         logger.info(f"start isomer deduplication: {database_path}")
-        batch_size = 3
         for hac_folders in hacs:
             hac = hac_folders.name.split("_")[-1]
         
@@ -134,7 +121,7 @@ def main():
             
             classified_folders = convert_folder(hac_folders)
             logger.info(f"computing internal stats {hac}")
-            internal_counts = compute_internal_duplication(classified_folders, smiles_col, block_size, batch_size)
+            internal_counts = compute_internal_duplication(classified_folders, smiles_col, block_size)
             
             logger.info(f"computing database redundancy {hac}")
             overlaps = get_pairwise_overlaps(classified_folders, smiles_col, block_size)
