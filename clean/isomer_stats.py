@@ -133,7 +133,7 @@ def main():
                 
         for n in ["pairwise_duplication.csv", "internal_duplication.csv"]:
             files = Path(output_stats).glob(f"*/{n}")
-            pd.concat({f.parents.name: pd.read_csv(f, index_col=0) for f in files}).to_csv(output_stats/f"total_{n}")     
+            pd.concat({f.parent.name: pd.read_csv(f, index_col=0) for f in files}).to_csv(output_stats/f"total_{n}")     
             
 if __name__ == "__main__":
     # Run this if this file is executed from command line but not if is imported as API

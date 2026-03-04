@@ -418,3 +418,7 @@ if __name__ == "__main__":
             if sorted_file.exists():
                 sorted_file.unlink()
                 print(f"  Deleted: {sorted_file.name}")
+    
+    for n in ["pairwise_duplication.csv", "internal_duplication.csv"]:
+        files = Path(work_dir).glob(f"*/{n}")
+        pd.concat({f.parent.name: pd.read_csv(f, index_col=0) for f in files}).to_csv(work_dir/f"total_{n}")     
