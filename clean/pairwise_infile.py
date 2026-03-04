@@ -1,4 +1,3 @@
-import dask.dataframe as dd
 import pandas as pd
 from pathlib import Path
 import subprocess
@@ -9,13 +8,11 @@ from itertools import combinations
 import heapq
 import shutil
 import os
-import dask.dataframe as dd
 import pyarrow as pa
+import duckdb
 import pyarrow.parquet as pq
 
-scheduler_address = os.environ["DASK_SCHEDULER_ADDRESS"]
-client = Client(scheduler_address)    # Connect to that cluster
-client.wait_for_workers(n_workers=1, timeout=180)
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -27,7 +24,6 @@ def export_smiles_unsorted(
     db_path: list[str|Path],
     output_file: Path,
     smiles_col: str = "SMILES",
-    block_size: str = "64MB",
 ) -> int:
     """
     Export ALL SMILES (including internal duplicates) from a parquet database
@@ -40,15 +36,18 @@ def export_smiles_unsorted(
     Returns the original row count (before any deduplication).
     """
     logger.info(f"Exporting SMILES")
-    df = dd.read_parquet(db_path, columns=[smiles_col], blocksize=block_size).dropna()
+    path = list(str(x) for x in db_path)
+    con = duckdb.connect()
+    query = f"""
+        COPY (
+            SELECT {smiles_col}
+            FROM read_parquet({path})
+            WHERE {smiles_col} IS NOT NULL
+        ) TO '{output_file}' (HEADER FALSE)
+    """
+    con.execute(query)
+    con.close()
 
-    df[[smiles_col]].to_csv(
-        str(output_file),
-        single_file=True,
-        index=False,
-        header=False,
-        compute=True,
-    )
     result = subprocess.run(
         ["wc", "-l", str(output_file)],
         check=True, capture_output=True, text=True,
@@ -235,7 +234,6 @@ def compute_pairwise_overlaps(
     work_dir: Path,
     output_parquet: Path,
     smiles_col: str = "SMILES",
-    block_size: str = "64MB",
     sort_buffer: str = "4G",
     sort_parallel: int = 4,
     chunk_size: int = 10_000_000,
@@ -268,9 +266,9 @@ def compute_pairwise_overlaps(
     unique_counts:   dict[str, int]  = {}
     
     with open(work_stats) as f:
-        lines = f.read_lines()
+        lines = f.readlines()
         for l in lines:
-            db_id, file, num = l.split(":")
+            db_id, file, num = l.strip().split(":")
             if "unsorted" in file:
                 original_counts[db_id] = int(num)
             elif "_sorted" in file:
@@ -283,13 +281,13 @@ def compute_pairwise_overlaps(
         if db_id not in original_counts:
             # sorted file exists — reuse it but we still need the original count
             original_n = export_smiles_unsorted(
-                db_path, unsorted_file, smiles_col, block_size
+                db_path, unsorted_file, smiles_col
             )
             
             original_counts[db_id]  = original_n
             
             with open(work_stats, "a") as f:
-                f.write(f"{db_id}:{unsorted_file}:{original_n}")
+                f.write(f"{db_id}:{unsorted_file}:{original_n}\n")
         
         if db_id not in unique_counts:
             unique_n = sort_file(
@@ -297,7 +295,7 @@ def compute_pairwise_overlaps(
             )
         
             with open(work_stats, "a") as f:
-                f.write(f"{db_id}:{sorted_file}:{unique_n}")
+                f.write(f"{db_id}:{sorted_file}:{unique_n}\n")
             
             unique_counts[db_id] = unique_n
             
@@ -351,8 +349,6 @@ if __name__ == "__main__":
                         help="Sort threads (default: CPU count)")
     parser.add_argument("-s", "--smiles-col", default="SMILES",
                         help="SMILES column name (default: SMILES)")
-    parser.add_argument("--block-size", default="64MB",
-                        help="Dask read blocksize (default: 64MB)")
     parser.add_argument("--chunk-size", type=int, default=10_000_000,
                         help="Parquet flush interval in rows (default: 10_000_000)")
 
@@ -400,7 +396,6 @@ if __name__ == "__main__":
                                                                         work_dir= output_hac,
                                                                         output_parquet= output_parquet,
                                                                         smiles_col= args.smiles_col,
-                                                                        block_size= args.block_size,
                                                                         sort_buffer= args.buffer_size,
                                                                         sort_parallel= sort_parallel,
                                                                         chunk_size= args.chunk_size)
