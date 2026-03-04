@@ -185,8 +185,9 @@ def main():
         print(f"Initial cleaning completed in {end - start:.2f} seconds")    
 
         with open(stats, "r") as st:
-            hac = [int(x.strip().split("#")[-1]) for x in st.readlines()]
-            count = [int(x.split("#")[0].strip("HAC")) for x in st.readlines()]
+            lines = st.readlines()
+            hac = [int(x.strip().split("#")[-1]) for x in lines]
+            count = [int(x.split("#")[0].strip("HAC")) for x in lines]
             num = [count[0]]
             for x in pairwise(count):
                 num.append(x[1]- x[0])
