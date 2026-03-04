@@ -35,10 +35,15 @@ def parse_args():
                         default={"radius": 2, "fpSize": 1024})
     parser.add_argument('-ft','--fp_type', type=str, help='Fingerprint type supported by FPSim2', required=False,
                         default="Morgan")
-    parser.add_argument('-s', '--stage', type=str, choices=['convert', 'fingerprint', 'merge_smi', 'merge_batches', 'merge_final', "index", "sort"], help='Processing stage', required=True)
-
+    parser.add_argument('-s', '--stage', type=str, choices=['convert', 'fingerprint', 'merge_smi', 'merge_batches', "index", "sort"], help='Processing stage', required=True)
+    parser.add_argument('-os', '--output_searchdb', type=str, help='The output database folder path', 
+                        required=False, default='Molecular_database/search_db')
+    parser.add_argument('-c','--compression_level', type=int, help='The compression level for the sorted database, the lower the faster it seems', required=False, default=9)
+    parser.add_argument('-idb', '--input_searchdb', type=str, help='The input search db for the indexing and sorting', 
+                        required=False, default='tmp_chunks')
+    
     args = parser.parse_args()
-    return args.output_smi, args.input_path, args.batch_size, args.fp_param, args.fp_type, args.output_hdf, args.stage
+    return args.output_smi, args.input_path, args.batch_size, args.fp_param, args.fp_type, args.stage, args.output_searchdb, args.compression_level, args.input_searchdb
 
 def sort_function(x: str | Path) -> tuple[int, int]:
     """Sort function for sorting Parquet files."""
@@ -166,10 +171,6 @@ def create_index_on_existing_file(batch_output: Path | str,
     if not Path(batch_output).exists():
         print(f"{batch_output} doesn't exists")
         return
-    
-    if tmp_dir is None:
-        tmp_dir = Path(db_file).parent / Path(db_file).stem + "_tmp_index"
-        tmp_dir.mkdir(exist_ok=True)
         
     with tb.open_file(batch_output, mode="a") as f:  # ← "a" for append/modify
         # Check if index already exists
@@ -252,7 +253,7 @@ def merge_db_files(
             with tb.open_file(file, mode="r") as in_file:
                 fps_table.append(in_file.root.fps[:])
                 
-
+            
 def stage_create_fingerprints(output_smi: str | Path, fp_type: str, fp_param: dict):
     """Stage 3: Create fingerprint chunks (parallelized via SLURM array)"""
     
@@ -318,8 +319,7 @@ def stage_create_fingerprints(output_smi: str | Path, fp_type: str, fp_param: di
         sys.exit(1)
 
 
-def stage_merge_fingerprints(final: bool = False, 
-                             output_hdf: str | Path | None = None):
+def stage_merge_fingerprints(output_path: str | Path = "Molecular_database/search_db"):
     """Stage 4: Merge fingerprint chunks into final database (single job)"""
     
     task_id = int(os.environ.get('SLURM_ARRAY_TASK_ID', 0))
@@ -331,21 +331,6 @@ def stage_merge_fingerprints(final: bool = False,
     # We need to know how many chunks were created
     chunk_files = sorted(TMP_DIR.glob("chunk_*.h5"), 
                          key=lambda x: int(x.stem.split('_')[-1]))
-    
-    if final:
-        # If this is the final stage, merge all batches into a single file
-        if output_hdf is None:
-            print("ERROR: output_hdf must be specified for final merge stage")
-            sys.exit(1)
-        output_file = Path(output_hdf)
-        batch_files = sorted(MERGE_DIR.glob("batch_*.h5"),
-                            key=lambda x: int(x.stem.split('_')[-1]))
-        if not batch_files:
-            print("ERROR: No batch files found")
-            sys.exit(1)
-
-        merge_db_files([str(f) for f in batch_files], str(output_file))
-        return output_file
     
     if not chunk_files:
         print("ERROR: No chunk files found")
@@ -573,42 +558,6 @@ def sort_db_file_fast(
             os.rename(tmp_filename, filename)
         raise e
 
-
-def estimate_sort_time(filename: str) -> dict:
-    """
-    Estimate sorting time for different compression levels.
-    
-    Parameters
-    ----------
-    filename : str
-        Path to the database file
-        
-    Returns
-    -------
-    dict
-        Estimated times for different compression levels
-    """
-    with tb.open_file(filename, mode="r") as f:
-        nrows = f.root.fps.nrows
-        file_size_mb = os.path.getsize(filename) / (1024 * 1024)
-    
-    # Rough estimates based on empirical testing
-    # Sorting is roughly O(n log n) but dominated by I/O
-    base_time = (nrows / 1_000_000) * 5  # ~5 min per million rows baseline
-    
-    estimates = {
-        "compression_3": base_time * 0.6,
-        "compression_6": base_time * 1.0,
-        "compression_9": base_time * 2.0,
-    }
-    
-    print(f"Database: {file_size_mb:.1f} MB, {nrows:,} rows")
-    print(f"Estimated sorting times:")
-    print(f"  Compression 3 (fast): ~{estimates['compression_3']:.0f} minutes")
-    print(f"  Compression 6 (balanced): ~{estimates['compression_6']:.0f} minutes")
-    print(f"  Compression 9 (slow): ~{estimates['compression_9']:.0f} minutes")
-    
-    return estimates
     
 
 def stage_final(input_path: str | Path,
@@ -620,19 +569,22 @@ def stage_final(input_path: str | Path,
     
     # Get SLURM array task ID
     task_id = int(os.environ.get('SLURM_ARRAY_TASK_ID', 0))
-    MERGE_DIR = Path(output_path)
-    batch_output = MERGE_DIR / f"batch_{task_id}.h5"
-    # Check if final file already exists
-
-    print(f"Creating index on {output_hdf}...")
+    array_size = int(os.environ.get('SLURM_ARRAY_TASK_COUNT', 1))
     
-    if not sort_by_popcnt:
-        create_index_on_existing_file(batch_output)
-        print("Index created successfully!")
+    out_dir = Path(output_path)          
+    input_file = list(Path(input_path).glob("*.h5"))[task_id::array_size]
+
+    for i, file in enumerate(input_file):  
+        # Check if final file already exists
+        print(f"Creating index on {file}...")
+        if not sort_by_popcnt:
+            create_index_on_existing_file(file)
+            print("Index created successfully!")
 
         if sort_by_popcnt:
             out_dir.mkdir(parents=True, exist_ok=True)
-            batch_output = out_dir / f"sorted_{task_id}.h5"
+            task = int(file.stem.split("_")[-1]) 
+            batch_output = out_dir / f"sorted_{task}.h5"
             sort_db_file_fast(file, batch_output, compression_level)
             
             print(f"Fingerprint database created at {batch_output}")
@@ -650,8 +602,8 @@ def main():
         stage_merge_smi(input_path, output_smi)
     elif stage == 'fingerprint':
         stage_create_fingerprints(output_smi, fp_type, fp_param)
-    elif stage == 'merge_batches' or stage == 'merge_final':
-        stage_merge_fingerprints(final=(stage == 'merge_final'), output_hdf=output_hdf)
+    elif stage == 'merge_batches':
+        stage_merge_fingerprints(output_searchdb)
     elif stage == 'sort' or stage == 'index':
         #stage_final(output_hdf, sort_by_popcnt=(stage == 'sort'))
         stage_final(input_searchdb, output_searchdb, sort_by_popcnt=(stage == 'sort'), compression_level=compression_level)

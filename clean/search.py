@@ -116,25 +116,25 @@ class RetrieveSmiles:
     index_file: str
     database_path: str
     mw_range: Sequence[float|int] | None = None
-    hac_limits: Sequence[int] | None = None
+    hac_limits: Sequence[int] | None = (4, 80)
     
     @property
     def upper(self) -> int | None:
         if self.hac_limits is not None and self.mw_range is not None:
             raise ValueError("Only one of mw_range or hac_limits can be specified")
         elif self.hac_limits is not None:
-            return self.hac_limits[0]
+            return self.hac_limits[1]
         elif self.mw_range is not None:
-            return convert_mw_to_hac(self.mw_range[0])
+            return convert_mw_to_hac(self.mw_range[1])
         else:
             return None
         
     @property
     def lower(self) -> int | None:
-        if self.hac_limits is not None and len(self.hac_limits) == 2:
-            return self.hac_limits[1]
-        elif self.mw_range is not None and len(self.mw_range[1]) == 2:
-            return convert_mw_to_hac(self.mw_range[1])
+        if self.hac_limits is not None:
+            return self.hac_limits[0]
+        elif self.mw_range is not None:
+            return convert_mw_to_hac(self.mw_range[0])
         else:
             return None
     
