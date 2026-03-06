@@ -1,243 +1,423 @@
-import dask.dataframe as dd
-from dask.distributed import Client, performance_report
-import os
-from pathlib import Path
-import argparse
-from collections import defaultdict
-from itertools import combinations
-import dask
 import pandas as pd
-import shutil
+from pathlib import Path
+import subprocess
 import logging
-import gc
-from typing import Sequence
-from utils import convert_folder
+from dask.distributed import Client
+import shutil
+from itertools import combinations
+import heapq
+import shutil
+import os
+import pyarrow as pa
+import duckdb
+import pyarrow.parquet as pq
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(description='Deduplicate SMILES')
-    parser.add_argument('-bs', '--blocksize', type=str, help='Block size for dask dataframe. The safest is the default 64MB',  required=False, default='64MB')
-    parser.add_argument('-dp','--database_path', type=str, help='The folder path for the database', required=False,
-                        default='Molecular_database')
-    parser.add_argument('-s','--smiles_col', type=str, help='The column name of the smiles', required=False,
-                        default='SMILES')
-    parser.add_argument('-op','--output_parquet', type=str, help="The name for the redundant_smiles file",   required=False, default='redudant_smiles.parquet')
-    parser.add_argument('-id','--id_col', type=str, help='The column name for the original IDs from the databases', required=False, default='ID')
-    args = parser.parse_args()
-    return args.blocksize, args.database_path, args.smiles_col, args.output_parquet, args.id_col
-
-
-scheduler_address = os.environ["DASK_SCHEDULER_ADDRESS"]
-client = Client(scheduler_address)    # Connect to that cluster
-client.wait_for_workers(n_workers=1, timeout=180)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Step 1 helpers: export & sort
+# ─────────────────────────────────────────────────────────────────────────────
 
-def compute_count(hac_folders, smiles_col="SMILES", block_size="64MB"):
-    # Read only necessary columns
-    ddf_merged = dd.read_parquet(f"{hac_folders}/*.parquet", blocksize=block_size,
-                                 columns=["db_id", smiles_col])
-    
-    # Compute counts per db_id per partition
-    def partition_counts(df):
-        return df.groupby("db_id")[smiles_col].count()
-    
-    # this is a partition groupby
-    counts_per_partition = ddf_merged.map_partitions(partition_counts)
-    final_count = counts_per_partition.groupby("db_id").sum().to_frame().rename(columns={smiles_col: "dropna_counts"}).compute()
-
-    del ddf_merged
-    client.run(gc.collect)
-
-    return final_count
-
-
-def compute_internal_duplication(
-    db_paths: dict[str, str],
-    smiles_cols: str = "SMILES",
-    block_size: str = "64MB",
-    batch_size: int = 2,
-    id_cols: str = "ID"
-):
+def export_smiles_unsorted(
+    db_path: list[str|Path],
+    output_file: Path,
+    smiles_col: str = "SMILES",
+) -> int:
     """
-    Compute internal deduplication statistics for many databases in smaller batches.
-    Returns a pandas Series of unique counts
+    Export ALL SMILES (including internal duplicates) from a parquet database
+    to a plain-text file, one per line, unsorted.
+
+    Deduplication is intentionally left to GNU sort -u, which handles it in a
+    single pass during sorting — faster than doing it separately in Python.
+    NaN values are dropped here because sort cannot handle them.
+
+    Returns the original row count (before any deduplication).
     """
-    counts = {}
-
-    # Convert items to a list so we can slice batches
-    db_items = list(db_paths.items())
-
-    for i in range(0, len(db_items), batch_size):
-        batch = db_items[i : i + batch_size]
-        lazy_results = []
-
-        # Build each batch of Dask operations
-        for db_id, path in batch:
-            df = dd.read_parquet(path, columns=[smiles_cols, id_cols], blocksize=block_size)
-            # El drop ID nunca debe hacerse en el pairwise
-            df_dedup = df.drop_duplicates(subset=smiles_cols)
-            unique = df_dedup.map_partitions(len).sum()
-            #dedup_dfs[db_id] = df_dedup
-            lazy_results.append(unique)
-
-        # Compute this batch in one go
-        computed_values = dask.compute(*lazy_results)
-        counts.update(dict(zip([db_id for db_id, _ in batch], computed_values)))
-
-    return pd.Series(counts, name="after_internal_deduplication")
-
-
-def get_overlap_by_merge(db1: str, db2: str, 
-                        db_paths: dict[str, str], 
-                        smiles_col: str ="SMILES",
-                        id_cols: str = "ID",
-                        block_size: str = "64MB",
-                        on_disk: bool=False):
-    
-    out_dir =  Path(f"tmp/{db1}_{db2}")
-    
-    if out_dir.exists():
-        return out_dir
-    
-    df1 = dd.read_parquet(db_paths[db1], columns=[smiles_col, id_cols], blocksize=block_size).drop_duplicates(subset=smiles_col)
-    df2 = dd.read_parquet(db_paths[db2], columns=[smiles_col, id_cols], blocksize=block_size).drop_duplicates(subset=smiles_col)
-
-    # Use the merge and let Dask manage the partitioning/shuffle
-    # If len(df1) and len(df2) are both large, this is the most Dask-idiomatic way.
-    # The 'on_disk' flag already handles the memory spill.
-    shuffle_method = "disk" if on_disk else "tasks"
-    overlap = dd.merge(df1, df2, on=smiles_col, how="inner", shuffle_method=shuffle_method)
-    
-    if on_disk:
-        overlap.to_parquet(out_dir, write_index=False, compute=True)
-        print(f"💾 Overlap of {db1} and {db2} saved to disk at {out_dir}")
-        return out_dir / "*.parquet"
-    
-    client.run(gc.collect)
-    return overlap # Returns a Dask DataFrame, not computed!
-
-
-def get_overlapping_databases(
-    db_paths: dict[str, str],
-    smiles_col: str ="SMILES",
-    id_cols: str = "ID",
-    block_size: str = "64MB",
-    on_disk: bool=False
-    ):
-    
-    overlaps={}
-    pairs = [sorted(x) for x in combinations(db_paths.keys(), 2)]
-    for db1, db2 in pairs:  # run n bacthes at a time
-        overlap = get_overlap_by_merge(db1, db2, db_paths, smiles_col, id_cols, block_size, on_disk)
-        overlaps[f"{db1}_{db2}"] = overlap
-    
-    return overlaps
-
-
-def count_reundancy(
-    overlaps: dict[str, dd.DataFrame | pd.DataFrame | Path],
-    smiles_col: str = "SMILES"
-    ):
-    
-    overlap_counts = {}
-    smiles_to_dbs = defaultdict(set)  
-    for pair, df in overlaps.items():
-        db1, db2 = pair.split("_")
-        if isinstance(df, (Path, str)):
-            df = dd.read_parquet(df, columns=[smiles_col])                 
-        sm = df[smiles_col].compute()
-        overlap_counts[pair] = len(sm)
-        for smi in sm:
-            smiles_to_dbs[smi].update([db1, db2])
-        del sm, df
-        
-    client.run(gc.collect)
-    
-    return smiles_to_dbs, overlap_counts
-
-
-def save_redundancy(
-    overlaps: dict[str, dd.DataFrame | pd.DataFrame | Path],
-    smiles_col: str ="SMILES",
-    output: str | Path ="redundant_smiles.parquet"):
+    logger.info(f"Exporting SMILES")
+    path = list(str(x) for x in db_path)
+    con = duckdb.connect()
+    query = f"""
+        COPY (
+            SELECT {smiles_col}
+            FROM read_parquet({path})
+            WHERE {smiles_col} IS NOT NULL
+        ) TO '{output_file}' (HEADER FALSE)
     """
-    Save the redundancy information to a parquet file and return the counts as a pandas Series.
+    con.execute(query)
+    con.close()
+
+    result = subprocess.run(
+        ["wc", "-l", str(output_file)],
+        check=True, capture_output=True, text=True,
+    )
+    original_count = int(result.stdout.split()[0])
+    logger.info(
+        f"  Written {original_count:,} SMILES (with duplicates) to {output_file.name}"
+    )
+    return original_count
+
+
+def sort_file(
+    input_file: Path,
+    output_file: Path,
+    temp_dir: Path,
+    buffer_size: str = "4G",
+    parallel: int = 4,
+) -> int:
     """
-    smiles_to_dbs, counts = count_reundancy(overlaps, smiles_col)
-    smiles_overlap_df = pd.DataFrame({
-                "SMILES": list(smiles_to_dbs.keys()),
-                "Databases": [",".join(sorted(list(v))) for v in smiles_to_dbs.values()]
-                    })
+    Sort input_file → output_file using GNU sort.
+    -u deduplicates during sorting (no extra pass needed).
+    Returns the number of unique lines in the output.
+    """
+    env = os.environ.copy()
+    env["LC_ALL"] = "C" 
     
-    smiles_overlap_df.to_parquet(output)
+    logger.info(f"Sorting {input_file.name} → {output_file.name}")
+    subprocess.run(
+        ["sort", "-u",
+            "-S", buffer_size,
+            "--parallel", str(parallel),
+            "-T", str(temp_dir),
+            "-o", str(output_file),
+            str(input_file),
+        ],
+        check=True,
+        env=env,
+    )
+    result = subprocess.run(
+        ["wc", "-l", str(output_file)],
+        check=True, capture_output=True, text=True,
+    )
+    unique_count = int(result.stdout.split()[0])
+    logger.info(f"  {unique_count:,} unique lines after sort -u")
+    return unique_count
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Step 2: single-pass k-way merge → pairwise counts + parquet
+# ─────────────────────────────────────────────────────────────────────────────
+
+def kway_merge_to_parquet(
+    db_sorted_files: dict[str, Path],
+    output_parquet: Path,
+    chunk_size: int = 10_000_000,
+) -> tuple[dict[str, int], int]:
+    """
+    Single pass over all sorted-unique database files simultaneously via a
+    min-heap.  Produces in one linear scan:
+
+      • pairwise overlap counts  {"{db1}_{db2}": count}
+      • redundant_smiles.parquet — one row per SMILES that appears in ≥2 DBs
+
+    Complexity
+    ──────────
+    Time  : O(N log K)   N = total unique SMILES across all DBs, K = #DBs
+    Memory: O(K + chunk_size rows)  — heap holds at most K entries at once
+
+    Every sorted file is read exactly ONCE regardless of how many databases
+    there are. 
+
+    Parquet schema
+    ──────────────
+    SMILES       string   — the molecule
+    db_ids    string   — comma-separated sorted db_ids  e.g. "003,007,012"
+    n_databases  int32    — number of databases containing this SMILES
+    """
+    logger.info(
+        f"K-way merge of {len(db_sorted_files)} files → {output_parquet.name}"
+    )
+
+    schema = pa.schema([
+        pa.field("SMILES",      pa.string()),
+        pa.field("db_ids",   pa.string()),
+        pa.field("n_databases", pa.int32()),
+    ])
+    writer = pq.ParquetWriter(output_parquet, schema)
+
+    def flush(rows: list[dict]) -> None:
+        writer.write_table(
+            pa.Table.from_pandas(
+                pd.DataFrame(rows, columns=["SMILES", "db_ids", "n_databases"]),
+                schema=schema,
+            )
+        )
+
+    # ── open files and seed the heap ─────────────────────────────────────────
+    handles: dict[str, object] = {}
+    heap: list[tuple[str, str]] = []
+
+    for db_id, path in sorted(db_sorted_files.items()):
+        f = open(path, "r")
+        handles[db_id] = f
+        line = f.readline().strip()
+        if line:
+            heapq.heappush(heap, (line, db_id))
             
-    return pd.Series(counts, name="redundant_count")
+    pairs = [sorted(x) for x in combinations(db_sorted_files.keys(), 2)]
+    # initialise all pair counters at zero
+    pair_counts: dict[str, int] = {
+        f"{a}_{b}": 0 for a, b in pairs
+    }
+
+    # ── main merge loop ───────────────────────────────────────────────────────
+    current_smiles: str | None = None
+    current_dbs: set[str]      = set()
+    buffer: list[dict]         = []
+    total_redundant            = 0
+    total_checked              = 0
+
+    while heap:
+        smiles, db_id = heapq.heappop(heap)
+        total_checked += 1
+
+        if total_checked % 10_000_000 == 0:
+            logger.info(
+                f"  {total_checked:,} processed, {total_redundant:,} redundant …"
+            )
+
+        if smiles != current_smiles:
+            # ── emit the finished group ───────────────────────────────────
+            if current_smiles is not None and len(current_dbs) >= 2:
+                dbs_sorted = sorted(current_dbs)
+                buffer.append({
+                    "SMILES":      current_smiles,
+                    "db_ids":   ",".join(dbs_sorted),
+                    "n_databases": len(dbs_sorted),
+                })
+                total_redundant += 1
+                for a, b in [sorted(x) for x in combinations(dbs_sorted, 2)]:
+                    pair_counts[f"{a}_{b}"] += 1
+                if len(buffer) >= chunk_size:
+                    logger.info(f"  Flushing {len(buffer):,} rows …")
+                    flush(buffer)
+                    buffer = []
+
+            current_smiles = smiles
+            current_dbs    = {db_id}
+        else:
+            current_dbs.add(db_id)
+
+        nxt = handles[db_id].readline().strip()
+        if nxt:
+            heapq.heappush(heap, (nxt, db_id))
+
+    # ── final group ───────────────────────────────────────────────────────────
+    if current_smiles is not None and len(current_dbs) >= 2:
+        dbs_sorted = sorted(current_dbs)
+        buffer.append({
+            "SMILES":      current_smiles,
+            "db_ids":   ",".join(dbs_sorted),
+            "n_databases": len(dbs_sorted),
+        })
+        total_redundant += 1
+        for a, b in [sorted(x) for x in combinations(dbs_sorted, 2)]:
+            pair_counts[f"{a}_{b}"] += 1
+
+    if buffer:
+        flush(buffer)
+
+    for f in handles.values():
+        f.close()
+    writer.close()
+
+    logger.info(f"✅ {total_redundant:,} redundant SMILES → {output_parquet.name}")
+    return pair_counts, total_redundant
 
 
-def main():
-    block_size, database_path, smiles_col, out_parquet, id_col = parse_args()
+# ─────────────────────────────────────────────────────────────────────────────
+# Top-level pipeline
+# ─────────────────────────────────────────────────────────────────────────────
+
+def compute_pairwise_overlaps(
+    db_paths: dict[str, list[str|Path]],
+    work_dir: Path,
+    output_parquet: Path,
+    smiles_col: str = "SMILES",
+    sort_buffer: str = "4G",
+    sort_parallel: int = 4,
+    chunk_size: int = 10_000_000,
+) -> tuple[dict[str, int], dict[str, int], dict[str, int], int]:
+    """
+    Full pipeline:
+      1. Export each DB's SMILES (with duplicates) to a text file
+      2. Sort + deduplicate each file with GNU sort -u
+      3. Single-pass k-way merge → pairwise counts + redundant_smiles.parquet
+
+    Returns
+    -------
+    pair_counts     : {"{db1}_{db2}": overlap_count}
+    original_counts : {db_id: row_count_before_any_dedup}
+    unique_counts   : {db_id: unique_smiles_count_after_sort_-u}
+    total_redundant : number of rows written to the parquet
+    """
+    work_dir = Path(work_dir)
+    temp_dir = work_dir / "sort_temp"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    work_stats = work_dir / "finished.txt"
+    work_stats.touch(exist_ok=True)
+
+    logger.info("=" * 80)
+    logger.info("STEP 1 — Export (original counts) & sort -u (unique counts)")
+    logger.info("=" * 80)
+
+    db_sorted_files: dict[str, Path] = {}
+    original_counts: dict[str, int]  = {}
+    unique_counts:   dict[str, int]  = {}
     
-    with performance_report(filename="dask-pairwise.html"):
-        # Batch size can match #workers if desired, but each DB is processed fully partitioned
-        database_path = Path(database_path)
-        output_stats = database_path/"pairwise_stats"
-        progress = Path("progress_pairwise.txt")
-        progress.touch(exist_ok=True)
-        hacs = sorted(database_path.glob("HAC_*"), key=lambda x: int(x.name.split("_")[-1]))
-        
-        # restart the tmp folder
-        if Path(f"tmp").exists():
-            shutil.rmtree(f"tmp", ignore_errors=True)
-            
-        logger.info(f"start pairwise deduplication: {database_path}")
-        size_limit = 20 * (1024 ** 3)   
-        for hac_folders in hacs:
-            hac = hac_folders.name.split("_")[-1]
-        
-            if f"HAC {hac} done" in progress.read_text():
-                print(f"HAC {hac} already done, skipping.")     
-                continue
-            ## look at the file size to decide if on disk or not
-            file_sizes = sum([p.stat().st_size for p in hac_folders.glob("*.parquet")])
-            batch_size = 4
-            on_disk = False
-            if file_sizes >= size_limit:
-                batch_size = 2
-                on_disk=True
+    with open(work_stats) as f:
+        lines = f.readlines()
+        for l in lines:
+            db_id, file, num = l.strip().split(":")
+            if "unsorted" in file:
+                original_counts[db_id] = int(num)
+            elif "_sorted" in file:
+                unique_counts[db_id] = int(num)
                 
-            (output_stats/hac).mkdir(parents=True, exist_ok=True)
-            out_parq = output_stats / hac / out_parquet 
-            logger.info(f"counting stats {hac}")
-            sta = compute_count(hac_folders, smiles_col, block_size)
-            
-            classified_folders = convert_folder(hac_folders)
-            logger.info(f"computing internal stats {hac}")
-            internal_counts = compute_internal_duplication(classified_folders, smiles_col,  block_size, 
-                                                                      batch_size, id_col)
-            
-            logger.info(f"computing database redundancy {hac}")
-            overlaps = get_overlapping_databases(classified_folders, smiles_col, id_col, block_size, on_disk)
+    for db_id, db_path in sorted(db_paths.items()):
+        sorted_file   = work_dir / f"db_{db_id}_sorted.txt"
+        unsorted_file = work_dir / f"db_{db_id}_unsorted.txt"
 
-            logger.info(f"Save database redundancy {hac}")
-            redundant_counts = save_redundancy(overlaps, smiles_col, out_parq)
+        if db_id not in original_counts:
+            # sorted file exists — reuse it but we still need the original count
+            original_n = export_smiles_unsorted(
+                db_path, unsorted_file, smiles_col
+            )
             
-            overlaps.clear()
-            # save to disk the results
-            pd.concat([sta, internal_counts], axis=1).to_csv(output_stats/hac/"internal_duplication.csv")
-            redundant_counts.to_csv(output_stats/hac/"pairwise_duplication.csv")
-
-            with open(progress, "a") as f:
-                f.write(f"HAC {hac} done\n")
+            original_counts[db_id]  = original_n
             
-            if Path(f"tmp").exists():
-                shutil.rmtree(f"tmp", ignore_errors=True)
-                
-        for n in ["pairwise_duplication.csv", "internal_duplication.csv"]:
-            files = Path(output_stats).glob(f"*/{n}")
-            pd.concat({f.parents.name: pd.read_csv(f, index_col=0) for f in files}).to_csv(output_stats/f"total_{n}")
+            with open(work_stats, "a") as f:
+                f.write(f"{db_id}:{unsorted_file}:{original_n}\n")
         
+        if db_id not in unique_counts:
+            unique_n = sort_file(
+                unsorted_file, sorted_file, temp_dir, sort_buffer, sort_parallel
+            )
+        
+            with open(work_stats, "a") as f:
+                f.write(f"{db_id}:{sorted_file}:{unique_n}\n")
+            
+            unique_counts[db_id] = unique_n
+            
+            unsorted_file.unlink()
+         
+        db_sorted_files[db_id]  = sorted_file
+
+    if temp_dir.exists():
+        shutil.rmtree(temp_dir)
+
+    logger.info("=" * 80)
+    logger.info("STEP 2 — Single-pass k-way merge")
+    logger.info("=" * 80)
+
+    pair_counts, total_redundant = kway_merge_to_parquet(
+        db_sorted_files, output_parquet, chunk_size
+    )
+
+    return pair_counts, original_counts, unique_counts, db_sorted_files
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CLI
+# ─────────────────────────────────────────────────────────────────────────────
+
 if __name__ == "__main__":
-    # Run this if this file is executed from command line but not if is imported as API
-    main()
+    import argparse
+    
+    parser = argparse.ArgumentParser(
+        description=(
+            "Stable pairwise overlap computation for billions of molecules. "
+            "Uses GNU sort -u + single-pass k-way merge instead of Dask merge."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+    Examples:
+    python system_sort_overlap.py Molecular_database/HAC_21
+    python system_sort_overlap.py Molecular_database/HAC_21 -b 16G -p 16
+    python system_sort_overlap.py Molecular_database/HAC_21 -o results/hac21.parquet
+    """,
+    )
+    
+    parser.add_argument('-dp','--database_path', type=str, 
+                        help='The folder path for the database', required=False,
+                        default='Molecular_database')
+    parser.add_argument("-o", "--output", default="redundant_smiles.parquet",
+                        help="Output parquet (default: <work_dir>/redundant_smiles.parquet)")
+    parser.add_argument("-b", "--buffer-size", default="4G",
+                        help="RAM for GNU sort, e.g. 4G, 8G, 16G  (default: 4G)")
+    parser.add_argument("-p", "--parallel", type=int, default=None,
+                        help="Sort threads (default: CPU count)")
+    parser.add_argument("-s", "--smiles-col", default="SMILES",
+                        help="SMILES column name (default: SMILES)")
+    parser.add_argument("--chunk-size", type=int, default=10_000_000,
+                        help="Parquet flush interval in rows (default: 10_000_000)")
+
+    
+    args = parser.parse_args()
+    
+    from utils import convert_folder
+    
+    database_path = Path(args.database_path)
+    
+    if not database_path.exists():
+        parser.error(f"HAC folder does not exist: {database_path}")
+    
+    work_dir = Path(f"{database_path}/pairwise_analysis")
+    work_dir.mkdir(parents=True, exist_ok=True)
+    sort_parallel = args.parallel if args.parallel else os.cpu_count()
+    
+    print("\n" + "="*80)
+    print("RESULTS")
+    print("="*80)
+    print(f"Data Folder: {database_path}")
+    print(f"Work Directory: {work_dir}")
+    print(f"Sort Settings: {args.buffer_size} buffer, {sort_parallel} parallel threads")
+    
+    progress = work_dir / "progress_pairwise.txt"
+    progress.touch(exist_ok=True)
+    hacs = sorted(database_path.glob("HAC_*"), key=lambda x: int(x.name.split("_")[-1]))
+    
+    for hac_folder in hacs:
+        logger.info(f"\nProcessing HAC folder: {hac_folder}")
+        hac = hac_folder.name.split("_")[-1]
+        
+        if f"HAC {hac} done" in progress.read_text():
+            print(f"HAC {hac} already done, skipping.")     
+            continue
+        
+        db_paths = convert_folder(hac_folder)
+        output_hac = work_dir / hac
+        output_hac.mkdir(parents=True, exist_ok=True) 
+        output_parquet = output_hac / args.output
+    
+
+        pair_counts, original_counts, unique_counts, db_sorted_files =  compute_pairwise_overlaps(
+                                                                        db_paths= db_paths,
+                                                                        work_dir= output_hac,
+                                                                        output_parquet= output_parquet,
+                                                                        smiles_col= args.smiles_col,
+                                                                        sort_buffer= args.buffer_size,
+                                                                        sort_parallel= sort_parallel,
+                                                                        chunk_size= args.chunk_size)
+        
+        unique_counts_series = pd.Series(unique_counts, name="after_internal_deduplication")
+        processed_counts_series = pd.Series(original_counts, name="dropna_counts")
+        internal_counts = pd.concat([processed_counts_series, unique_counts_series], axis=1)
+        internal_counts.to_csv(work_dir/hac/"internal_duplication.csv")
+        pd.Series(pair_counts, name="pairwise_overlaps").to_csv(work_dir/hac/"pairwise_duplication.csv")
+        
+        with open(progress, "a") as f:
+            f.write(f"HAC {hac} done\n")
+        
+        # Clean up sorted files if requested
+        print("\n" + "="*80)
+        print("CLEANING UP SORTED FILES")
+        print("="*80)
+        for db_id, sorted_file in db_sorted_files.items():
+            if sorted_file.exists():
+                sorted_file.unlink()
+                print(f"  Deleted: {sorted_file.name}")
+    
+    for n in ["pairwise_duplication.csv", "internal_duplication.csv"]:
+        files = Path(work_dir).glob(f"*/{n}")
+        pd.concat({f.parent.name: pd.read_csv(f, index_col=0) for f in files}).to_csv(work_dir/f"total_{n}")     
