@@ -41,9 +41,11 @@ def parse_args():
     parser.add_argument('-c','--compression_level', type=int, help='The compression level for the sorted database, the lower the faster it seems', required=False, default=9)
     parser.add_argument('-idb', '--input_searchdb', type=str, help='The input search db for the indexing and sorting', 
                         required=False, default='tmp_chunks')
+    parser.add_argument('-cn','--chunk_num', type=int, help='number of chunks', required=False,
+                        default=255)
     
     args = parser.parse_args()
-    return args.output_smi, args.input_path, args.batch_size, args.fp_param, args.fp_type, args.stage, args.output_searchdb, args.compression_level, args.input_searchdb
+    return args.output_smi, args.input_path, args.batch_size, args.fp_param, args.fp_type, args.stage, args.output_searchdb, args.compression_level, args.input_searchdb, args.chunk_num
 
 def sort_function(x: str | Path) -> tuple[int, int]:
     """Sort function for sorting Parquet files."""
@@ -254,7 +256,8 @@ def merge_db_files(
                 fps_table.append(in_file.root.fps[:])
                 
             
-def stage_create_fingerprints(output_smi: str | Path, fp_type: str, fp_param: dict):
+def stage_create_fingerprints(output_smi: str | Path, fp_type: str, fp_param: dict,
+                              chunk_num: int = 255):
     """Stage 3: Create fingerprint chunks (parallelized via SLURM array)"""
     
     # Get SLURM array task ID
@@ -271,52 +274,47 @@ def stage_create_fingerprints(output_smi: str | Path, fp_type: str, fp_param: di
     print(f"[Task {task_id}] Total molecules: {total_mols}")
     
     # Calculate chunks
-    chunks = calculate_chunks(total_mols, array_size, m=1)
-    chunk_list = list(enumerate(chunks))
+    chunks = calculate_chunks(total_mols, chunk_num, m=1)
+    chunk_list = list(enumerate(chunks))[task_id::array_size]
     
-    # This task processes only its assigned chunk
-    if task_id >= len(chunk_list):
-        print(f"[Task {task_id}] No chunk assigned (total chunks: {len(chunk_list)})")
-        return
+    for chunk_id, chunk in chunk_list:
     
-    chunk_id, chunk = chunk_list[task_id]
-    
-    final_file = TMP_DIR / f"chunk_{chunk_id}.h5"
-    tmp_file = TMP_DIR / f"chunk_{chunk_id}.h5.tmp"
-    
-    # Check if already completed
-    if final_file.exists():
-        print(f"[Task {task_id}] Chunk {chunk_id} already completed")
-        return
-    
-    # Clean up any stale temp file
-    if tmp_file.exists():
-        print(f"[Task {task_id}] Removing stale temp file")
-        tmp_file.unlink()
-    
-    try:
-        print(f"[Task {task_id}] Creating chunk {chunk_id} (rows {chunk[0]}-{chunk[1]})")
+        final_file = TMP_DIR / f"chunk_{chunk_id}.h5"
+        tmp_file = TMP_DIR / f"chunk_{chunk_id}.h5.tmp"
         
-        create_db_file(
-            read_chunk(output_smi, chunk[0], chunk[1]),
-            str(tmp_file),
-            mol_format="smiles",
-            fp_type=fp_type,
-            fp_params=fp_param,
-            sort_by_popcnt=False,
-            full_sanitization=False,
-        )
+        # Check if already completed
+        if final_file.exists():
+            print(f"[Task {task_id}] Chunk {chunk_id} already completed")
+            return
         
-        # Atomic move ensures completion
-        tmp_file.replace(final_file)
-        
-        print(f"[Task {task_id}] Successfully created chunk {chunk_id}")
-        
-    except Exception as e:
-        print(f"[Task {task_id}] ERROR creating chunk {chunk_id}: {e}")
+        # Clean up any stale temp file
         if tmp_file.exists():
+            print(f"[Task {task_id}] Removing stale temp file")
             tmp_file.unlink()
-        sys.exit(1)
+        
+        try:
+            print(f"[Task {task_id}] Creating chunk {chunk_id} (rows {chunk[0]}-{chunk[1]})")
+            
+            create_db_file(
+                read_chunk(output_smi, chunk[0], chunk[1]),
+                str(tmp_file),
+                mol_format="smiles",
+                fp_type=fp_type,
+                fp_params=fp_param,
+                sort_by_popcnt=False,
+                full_sanitization=False,
+            )
+            
+            # Atomic move ensures completion
+            tmp_file.replace(final_file)
+            
+            print(f"[Task {task_id}] Successfully created chunk {chunk_id}")
+            
+        except Exception as e:
+            print(f"[Task {task_id}] ERROR creating chunk {chunk_id}: {e}")
+            if tmp_file.exists():
+                tmp_file.unlink()
+            sys.exit(1)
 
 
 def stage_merge_fingerprints(output_path: str | Path = "Molecular_database/search_db"):
@@ -591,7 +589,7 @@ def stage_final(input_path: str | Path,
 
 
 def main():
-    output_smi, input_path, batch_size, fp_param, fp_type, stage, output_searchdb, compression_level, input_searchdb = parse_args()
+    output_smi, input_path, batch_size, fp_param, fp_type, stage, output_searchdb, compression_level, input_searchdb, chunk_num = parse_args()
     RDLogger.DisableLog('rdApp.*')
     
     start = time.perf_counter()
@@ -601,11 +599,10 @@ def main():
     elif stage == 'merge_smi':
         stage_merge_smi(input_path, output_smi)
     elif stage == 'fingerprint':
-        stage_create_fingerprints(output_smi, fp_type, fp_param)
+        stage_create_fingerprints(output_smi, fp_type, fp_param, chunk_num)
     elif stage == 'merge_batches':
         stage_merge_fingerprints(output_searchdb)
     elif stage == 'sort' or stage == 'index':
-        #stage_final(output_hdf, sort_by_popcnt=(stage == 'sort'))
         stage_final(input_searchdb, output_searchdb, sort_by_popcnt=(stage == 'sort'), compression_level=compression_level)
     else:
         print(f"Unknown stage: {stage}")
