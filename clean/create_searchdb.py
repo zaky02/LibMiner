@@ -285,7 +285,7 @@ def stage_create_fingerprints(output_smi: str | Path, fp_type: str, fp_param: di
         # Check if already completed
         if final_file.exists():
             print(f"[Task {task_id}] Chunk {chunk_id} already completed")
-            return
+            continue
         
         # Clean up any stale temp file
         if tmp_file.exists():
@@ -427,7 +427,6 @@ def sort_db_file_fast(
     Optimized version of FPSim2's sort_db_file for billion-molecule databases.
     
     Improvements:
-    - Lower default compression (6 instead of 9) for 2-3x speedup
     - Streaming popcnt calculation (works with any database size)
     - Progress reporting
     - Timing information
