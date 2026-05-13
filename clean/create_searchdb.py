@@ -437,6 +437,8 @@ def sort_db_file_fast(
     ----------
     filename : str
         Path to the database file to sort
+    out_file : str
+        Path to the output sorted database file
     compression_level : int, optional
         Blosc2 compression level (1-9)
         - 1-3: Fast, larger files (~10-15% larger than level 9)
@@ -447,7 +449,7 @@ def sort_db_file_fast(
     """
     if verbose:
         print(f"\n{'='*60}")
-        print(f"Optimized Database Sorting")
+        print("Optimized Database Sorting")
         print(f"{'='*60}")
         print(f"File: {filename}")
         print(f"Compression level: {compression_level}")
@@ -457,6 +459,10 @@ def sort_db_file_fast(
     # Rename unsorted file
     tmp_filename = filename
 
+    
+    if os.path.exists(tmp_filename) and os.path.exists(out_file):
+        os.remove(out_file)
+    
     # Use specified compression level
     filters = tb.Filters(complib="blosc2", complevel=compression_level, fletcher32=False)
     
@@ -476,7 +482,7 @@ def sort_db_file_fast(
                 nrows = fp_file.root.fps.nrows
                 print(f"Rows to sort: {nrows:,}")
                 print(f"Fingerprint length: {fp_length}")
-                print(f"\nStep 1/2: Copying and sorting table...")
+                print("\nStep 1/2: Copying and sorting table...")
             
             copy_start = time.time()
             
@@ -537,22 +543,17 @@ def sort_db_file_fast(
         
         if verbose:
             print(f"\n{'='*60}")
-            print(f"Sorting completed successfully!")
+            print("Sorting completed successfully!")
             print(f"Total time: {total_time:.1f}s")
             print(f"  Copy/sort: {copy_time:.1f}s ({copy_time/total_time*100:.1f}%)")
             print(f"  Popcnt bins: {bins_time:.1f}s ({bins_time/total_time*100:.1f}%)")
             
             # Show file size
-            file_size_mb = os.path.getsize(filename) / (1024 * 1024)
+            file_size_mb = os.path.getsize(out_file) / (1024 * 1024)
             print(f"Output file size: {file_size_mb:.1f} MB")
             print(f"{'='*60}\n")
     
     except Exception as e:
-        # Restore original file if sorting fails
-        if os.path.exists(tmp_filename):
-            if os.path.exists(filename):
-                os.remove(filename)
-            os.rename(tmp_filename, filename)
         raise e
 
     
@@ -569,7 +570,7 @@ def stage_final(input_path: str | Path,
     array_size = int(os.environ.get('SLURM_ARRAY_TASK_COUNT', 1))
     
     out_dir = Path(output_path)          
-    input_file = list(Path(input_path).glob("*.h5"))[task_id::array_size]
+    input_file = sorted(Path(input_path).glob("*.h5"), key=lambda x: int(x.stem.split("_")[-1]))[task_id::array_size]
 
     for i, file in enumerate(input_file):  
         # Check if final file already exists
