@@ -103,7 +103,7 @@ def main():
     with performance_report(filename="dask-isomer.html"):
         # Batch size can match #workers if desired, but each DB is processed fully partitioned
         database_path = Path(database_path)
-        output_stats = Path(output_path) / "isomer_stats"
+        output_stats = Path(output_path) / "isomer_analysis"
         progress = Path("progress_isomers.txt")
         progress.touch(exist_ok=True)
         hacs = sorted(database_path.glob("HAC_*"), key=lambda x: int(x.name.split("_")[-1]))
