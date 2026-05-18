@@ -466,12 +466,18 @@ def process_query_by_db(db_name: str, query: str | list[str],
     
     for db in my_chunk:
         db_task = int(db.stem.split('_')[-1]) 
+        
+        out_pkl = f"{outpath}/search_{db_task}.pkl"
+        if Path(out_pkl).exists():
+            print(f"Search results for {db} already exists, skipping...")
+            continue
+        
         fp = FPSim2Query(query=query, db_name=db, workers=num_workers, on_disk=on_disk)
         search = {"similarity": partial(fp.similarity_search, top_k=top_k, threshold=threshold), 
                   "substructure": fp.substructure_screenout}    
         
         search_results = search[search_type]()
-        with open(f"{outpath}/search_{db_task}.pkl", "wb") as js:
+        with open(out_pkl, "wb") as js:
             pk.dump(search_results, js)
         
         del fp; gc.collect()
