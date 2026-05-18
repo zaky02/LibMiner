@@ -519,8 +519,8 @@ def main():
             Path(output_file).parents.mkdir(parents=True, exist_ok=True)
             pd.concat(smiles).to_csv(output_file)
             
-        case _:
-            raise NotImplemented("Unknown stage")
+        case other:
+            raise NotImplemented(f"Unknown stage {other}, expected 'search' or 'retrieve'")
     
 if __name__ == "__main__":
     # Run this if this file is executed from command line but not if is imported as API
