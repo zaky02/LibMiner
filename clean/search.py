@@ -218,10 +218,11 @@ class SmilesRetriever:
             else:
                 index = pd.DataFrame(index)
                 index.columns = ["mol_id", "Tanimoto"]
+                index["mol_id"] = index["mol_id"].astype(int)
                 index.set_index("mol_id", inplace=True)
                 dat = res[res["num_ID"].isin(index.index)]
                 coeff = index.loc[dat["num_ID"]]["Tanimoto"]
-                dat = pd.concat([dat, coeff], axis=1)
+                dat["Tanimoto"] = coeff.values
                 
             result[query] = dat
             
@@ -244,11 +245,11 @@ class SmilesRetriever:
 @dataclass
 class IsomerRetriever:
     """
-    Retrieve isomers from the original database and optionally
+    Retrieve isomers from the deduplicated database and optionally
     filter by commercial availability.
     """
 
-    original_database: str
+    deduplicated_database: str
     pairwise_database: str | None = None
 
     commercially_available: bool = False
@@ -400,7 +401,7 @@ class IsomerRetriever:
     def _parquet_paths(self, smiles: list[str]) -> list[str]:
         hacs = self._compute_hacs(smiles)
         return [
-            f"{self.original_database}/HAC_{hac}/*.parquet"
+            f"{self.deduplicated_database}/HAC_{hac}/*.parquet"
             for hac in set(hacs)
         ]
 
