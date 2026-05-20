@@ -526,11 +526,11 @@ def main():
                                                commercial_databases, cdb_id)
             
             smiles = retrieve_isomers.run(smiles)
-            Path(output_file).parents.mkdir(parents=True, exist_ok=True)
+            Path(output_file).parent.mkdir(parents=True, exist_ok=True)
             pd.concat(smiles).to_csv(output_file)
             
         case other:
-            raise NotImplemented(f"Unknown stage {other}, expected 'search' or 'retrieve'")
+            raise NotImplementedError(f"Unknown stage {other}, expected 'search' or 'retrieve'")
     
 if __name__ == "__main__":
     # Run this if this file is executed from command line but not if is imported as API
