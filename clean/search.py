@@ -424,7 +424,9 @@ class IsomerRetriever:
         for query, df in queries.items():
             subset = all_isomers[
                 all_isomers["nostereo_SMILES"].isin(df["nostereo_SMILES"])
-            ].drop(columns=["nostereo_SMILES"])
+            ]
+            tanimoto_lookup = df[["nostereo_SMILES", "Tanimoto"]]
+            subset = subset.merge(tanimoto_lookup, how="left", on="nostereo_SMILES").drop(columns=["nostereo_SMILES"]).set_index("SMILES").sort_values("Tanimoto", ascending=False)
 
             result[query] = subset
 
