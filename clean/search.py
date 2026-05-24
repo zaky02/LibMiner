@@ -157,7 +157,7 @@ class SmilesRetriever:
         index_dict = {}
         bounds = np.array(sorted(lines.keys()))
         for query, result in search_results.items():
-            index = sorted([x for x in result[0]])
+            index = sorted([x[0] for x in result])
             i = np.unique(np.searchsorted(bounds, index, side="right"))
             hacs = [lines.get(x) for x in bounds[i]]
             index_dict[query] = hacs
@@ -216,13 +216,16 @@ class SmilesRetriever:
                 result[query] = dat
                 
             else:
-                index = pd.DataFrame(index)
-                index.columns = ["mol_id", "Tanimoto"]
-                index["mol_id"] = index["mol_id"].astype(int)
-                index.set_index("mol_id", inplace=True)
-                dat = res[res["num_ID"].isin(index.index)]
-                coeff = index.loc[dat["num_ID"]]["Tanimoto"]
-                dat["Tanimoto"] = coeff.values
+                if not index:
+                    dat = pd.DataFrame([(0, 0, 0)], columns=["nostereo_SMILES", "num_ID", "Tanimoto"])
+                else:
+                    index = pd.DataFrame(index)
+                    index.columns = ["mol_id", "Tanimoto"]
+                    index["mol_id"] = index["mol_id"].astype(int)
+                    index.set_index("mol_id", inplace=True)
+                    dat = res[res["num_ID"].isin(index.index)]
+                    coeff = index.loc[dat["num_ID"]]["Tanimoto"]
+                    dat["Tanimoto"] = coeff.values
                 
             result[query] = dat
             
@@ -278,7 +281,9 @@ class IsomerRetriever:
         db_con = duckdb.connect()
 
         try:
-            nostereo_smiles = list(set(pd.concat(queries.values(), axis=0)["nostereo_SMILES"].to_list()))
+            nostereo = pd.concat(queries.values(), axis=0)
+            nostereo_smiles = list(set(nostereo[nostereo["Tanimoto"]>0]["nostereo_SMILES"].to_list()))
+
             parquet_paths = self._parquet_paths(nostereo_smiles)
 
             all_isomers = self._query_database(
@@ -422,11 +427,14 @@ class IsomerRetriever:
         result = {}
 
         for query, df in queries.items():
-            subset = all_isomers[
-                all_isomers["nostereo_SMILES"].isin(df["nostereo_SMILES"])
-            ]
-            tanimoto_lookup = df[["nostereo_SMILES", "Tanimoto"]]
-            subset = subset.merge(tanimoto_lookup, how="left", on="nostereo_SMILES").drop(columns=["nostereo_SMILES"]).set_index("SMILES").sort_values("Tanimoto", ascending=False)
+            if not df["Tanimoto"].sum():
+                subset = pd.DataFrame([(0,0,0,0)],columns=["ID", "SMILES", "db_id", "Tanimoto"]).set_index("SMILES")
+            else:
+                subset = all_isomers[
+                    all_isomers["nostereo_SMILES"].isin(df["nostereo_SMILES"])
+                ]
+                tanimoto_lookup = df[["nostereo_SMILES", "Tanimoto"]]
+                subset = subset.merge(tanimoto_lookup, how="left", on="nostereo_SMILES").drop(columns=["nostereo_SMILES"]).set_index("SMILES").sort_values("Tanimoto", ascending=False)
 
             result[query] = subset
 
