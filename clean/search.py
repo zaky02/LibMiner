@@ -517,7 +517,7 @@ def read_search_results(top_k: int = 100,
 def main():
     db_name, molecular_database, index_file, top_k, threshold, num_workers, query_path, on_disk,hac_limits, mw_range, search_type, deduplicated_database, commercially_avaliable, commercial_databases, pairwise_database, cdb_id, stage = parse_args()
    
-   query_path = Path(query_path)
+    query_path = Path(query_path)
     with open(query_path) as w:
         query = [x.strip() for x in w.readlines()]
         
