@@ -210,21 +210,20 @@ class SmilesRetriever:
         db_con = duckdb.connect()   
         res = self.retrieve_smiles(db_con, sorted(index), list(parquet))
         for query, index in search_result.items():
+            if not index: continue
+            
             if search_type == "substructure":
                 dat = res[res["num_ID"].isin(index)]
                 result[query] = dat
                 
             else:
-                if not index:
-                    dat = pd.DataFrame([(0, 0, 0)], columns=["nostereo_SMILES", "num_ID", "Tanimoto"])
-                else:
-                    index = pd.DataFrame(index)
-                    index.columns = ["mol_id", "Tanimoto"]
-                    index["mol_id"] = index["mol_id"].astype(int)
-                    index.set_index("mol_id", inplace=True)
-                    dat = res[res["num_ID"].isin(index.index)]
-                    coeff = index.loc[dat["num_ID"]]["Tanimoto"]
-                    dat["Tanimoto"] = coeff.values
+                index = pd.DataFrame(index)
+                index.columns = ["mol_id", "Tanimoto"]
+                index["mol_id"] = index["mol_id"].astype(int)
+                index.set_index("mol_id", inplace=True)
+                dat = res[res["num_ID"].isin(index.index)]
+                coeff = index.loc[dat["num_ID"]]["Tanimoto"]
+                dat["Tanimoto"] = coeff.values
                 
             result[query] = dat
             
@@ -281,7 +280,7 @@ class IsomerRetriever:
 
         try:
             nostereo = pd.concat(queries.values(), axis=0)
-            nostereo_smiles = list(set(nostereo[nostereo["Tanimoto"]>0]["nostereo_SMILES"].to_list()))
+            nostereo_smiles = list(set(nostereo["nostereo_SMILES"].to_list()))
 
             parquet_paths = self._parquet_paths(nostereo_smiles)
 
@@ -426,14 +425,11 @@ class IsomerRetriever:
         result = {}
 
         for query, df in queries.items():
-            if not df["Tanimoto"].sum():
-                subset = pd.DataFrame([(0,0,0,0)],columns=["ID", "SMILES", "db_id", "Tanimoto"]).set_index("SMILES")
-            else:
-                subset = all_isomers[
-                    all_isomers["nostereo_SMILES"].isin(df["nostereo_SMILES"])
-                ]
-                tanimoto_lookup = df[["nostereo_SMILES", "Tanimoto"]]
-                subset = subset.merge(tanimoto_lookup, how="left", on="nostereo_SMILES").drop(columns=["nostereo_SMILES"]).set_index("SMILES").sort_values("Tanimoto", ascending=False)
+            subset = all_isomers[
+                all_isomers["nostereo_SMILES"].isin(df["nostereo_SMILES"])
+            ]
+            tanimoto_lookup = df[["nostereo_SMILES", "Tanimoto"]]
+            subset = subset.merge(tanimoto_lookup, how="left", on="nostereo_SMILES").drop(columns=["nostereo_SMILES"]).set_index("SMILES").sort_values("Tanimoto", ascending=False)
 
             result[query] = subset
 
@@ -539,8 +535,12 @@ def main():
                                                commercial_databases, cdb_id)
             
             output_file = f"{query_path.parent}/{query_path.stem}_query_results.csv" 
-            smiles = retrieve_isomers.run(smiles)
-            pd.concat(smiles).to_csv(output_file)
+            smiles = pd.concat(retrieve_isomers.run(smiles))
+            query_not_indb = list(set(query) - set(smiles.index.unique(0)))
+            subset_not_indb = pd.DataFrame({"query": query_not_indb, "ID": 0, "SMILES": 0, "db_id": 0, 
+                                   "Tanimoto": 0}).set_index(["query", "SMILES"])
+            
+            pd.concat([subset_not_indb, smiles]).to_csv(output_file)
             
         case other:
             raise NotImplementedError(f"Unknown stage {other}, expected 'search' or 'retrieve'")

@@ -75,7 +75,7 @@ def convert_parquet_to_smi_chunk(parquet_path: str | Path, out_dir: str | Path,
     
     with open(smi_temp, "w", encoding="utf-8") as f:
         for batch in parquet_file.iter_batches(columns=[smiles_col, id_col], batch_size=batch_size):
-            smiles = batch.column(smiles_col)
+            smiles = batch.column(smiles_col).cast(pa.string())
             ids = batch.column(id_col).cast(pa.string())
             lines = pc.binary_join_element_wise(smiles, ids, "\n", " ")
             f.writelines(lines.to_pylist())
