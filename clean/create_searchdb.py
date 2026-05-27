@@ -302,7 +302,7 @@ def stage_create_fingerprints(output_smi: str | Path, fp_type: str, fp_param: di
                 fp_type=fp_type,
                 fp_params=fp_param,
                 sort_by_popcnt=False,
-                full_sanitization=False,
+                full_sanitization=True,
             )
             
             # Atomic move ensures completion

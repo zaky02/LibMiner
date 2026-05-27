@@ -5,5 +5,7 @@ subset_clustering/utils/__pycache__/*
 clean/*.smi
 clean/*.h5
 clean/*.csv
-clean/test_files
+clean/test*
+clean/hac*
 clean/files
+clean/search_db
