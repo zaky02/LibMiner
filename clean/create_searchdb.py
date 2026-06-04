@@ -276,20 +276,17 @@ def stage_create_fingerprints(output_smi: str | Path, fp_type: str, fp_param: di
     print(f"[Task {task_id}] Total molecules: {total_mols}")
     
     # Calculate chunks
+    processed_chunks = read_logs()
+    done_files = [f.stem.split('_')[-1] for f in TMP_DIR.glob("chunk_*.h5")]
     chunks = calculate_chunks(total_mols, chunk_num, m=1)
     chunk_list = list(enumerate(chunks))[task_id::array_size]
-
-
-
+    # Filter out already processed chunks (by task ID and existing files)
+    chunk_list = filter(lambda x: f"{x[0]}" not in processed_chunks + done_files, chunk_list)
+    
     for chunk_id, chunk in chunk_list:
     
         final_file = TMP_DIR / f"chunk_{chunk_id}.h5"
-        tmp_file = TMP_DIR / f"chunk_{chunk_id}.h5.tmp"
-        processed_chunks = read_logs()
-        # Check if already completed
-        if final_file.exists() or final_file.name in processed_chunks:
-            print(f"[Task {task_id}] Chunk {chunk_id} already completed")
-            continue
+        tmp_file = TMP_DIR / f"chunk_{chunk_id}.h5.tmp"        
         
         # Clean up any stale temp file
         if tmp_file.exists():
@@ -585,17 +582,17 @@ def stage_final(input_path: str | Path,
         if sort_by_popcnt:
             print(f"Sorting {file}")
             out_dir.mkdir(parents=True, exist_ok=True)
-            task = int(file.stem.split("_")[-1]) 
+            task = file.stem.split("_")[-1]
             batch_output = out_dir / f"sorted_{task}.h5"
             sort_db_file_fast(file, batch_output, compression_level)
-            safe_append(f"{file} moved\n", task_id)
+            safe_append(f"{task} moved\n", task_id)
             
     print(f"Fingerprint database created at {out_dir}")         
             
 
 def safe_append(message, task_id):
     """Append a message to the results file"""
-    path = Path("search_db_log")
+    path = Path("search_log")
     path.mkdir(exist_ok=True)
     log_file = path / f"results_{task_id}.log"
     with open(log_file, 'a') as lock:
@@ -604,9 +601,9 @@ def safe_append(message, task_id):
 def read_logs():
     """Read all log files and print results"""
     all_lines = []
-    for file in Path("search_db_log").glob("*.log"):
+    for file in Path("search_log").glob("*.log"):
         with open(file) as f:
-            all_lines.extend(list(Path(line.strip().split()[0]).name for line in f))
+            all_lines.extend(list(line.split()[0] for line in f))
     return all_lines
 
 
