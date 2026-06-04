@@ -20,6 +20,7 @@ import pyarrow.compute as pc
 import pyarrow as pa
 import rdkit
 from importlib.metadata import version
+import fcntl
 __version__ = version("FPSim2")
 
 
@@ -46,6 +47,7 @@ def parse_args():
     
     args = parser.parse_args()
     return args.output_smi, args.input_path, args.batch_size, args.fp_param, args.fp_type, args.stage, args.output_searchdb, args.compression_level, args.input_searchdb, args.chunk_num
+
 
 def sort_function(x: str | Path) -> tuple[int, int]:
     """Sort function for sorting Parquet files."""
@@ -276,14 +278,16 @@ def stage_create_fingerprints(output_smi: str | Path, fp_type: str, fp_param: di
     # Calculate chunks
     chunks = calculate_chunks(total_mols, chunk_num, m=1)
     chunk_list = list(enumerate(chunks))[task_id::array_size]
-    
+
+
+
     for chunk_id, chunk in chunk_list:
     
         final_file = TMP_DIR / f"chunk_{chunk_id}.h5"
         tmp_file = TMP_DIR / f"chunk_{chunk_id}.h5.tmp"
-        
+        processed_chunks = read_logs()
         # Check if already completed
-        if final_file.exists():
+        if final_file.exists() or final_file.name in processed_chunks:
             print(f"[Task {task_id}] Chunk {chunk_id} already completed")
             continue
         
@@ -555,8 +559,7 @@ def sort_db_file_fast(
     
     except Exception as e:
         raise e
-
-    
+   
 
 def stage_final(input_path: str | Path,
                 output_path: str | Path = "Molecular_database/search_db", 
@@ -580,12 +583,31 @@ def stage_final(input_path: str | Path,
             print("Index created successfully!")
 
         if sort_by_popcnt:
+            print(f"Sorting {file}")
             out_dir.mkdir(parents=True, exist_ok=True)
             task = int(file.stem.split("_")[-1]) 
             batch_output = out_dir / f"sorted_{task}.h5"
             sort_db_file_fast(file, batch_output, compression_level)
+            safe_append(f"{file} moved\n", task_id)
             
-            print(f"Fingerprint database created at {batch_output}")
+    print(f"Fingerprint database created at {out_dir}")         
+            
+
+def safe_append(message, task_id):
+    """Append a message to the results file"""
+    path = Path("search_db_log")
+    path.mkdir(exist_ok=True)
+    log_file = path / f"results_{task_id}.log"
+    with open(log_file, 'a') as lock:
+        lock.write(message)
+
+def read_logs():
+    """Read all log files and print results"""
+    all_lines = []
+    for file in Path("search_db_log").glob("*.log"):
+        with open(file) as f:
+            all_lines.extend(list(Path(line.strip().split()[0]).name for line in f))
+    return all_lines
 
 
 def main():
