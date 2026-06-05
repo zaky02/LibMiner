@@ -569,7 +569,8 @@ def stage_final(input_path: str | Path,
     task_id = int(os.environ.get('SLURM_ARRAY_TASK_ID', 0))
     array_size = int(os.environ.get('SLURM_ARRAY_TASK_COUNT', 1))
     
-    out_dir = Path(output_path)          
+    out_dir = Path(output_path)
+    out_dir.mkdir(parents=True, exist_ok=True)          
     input_file = sorted(Path(input_path).glob("*.h5"), key=lambda x: int(x.stem.split("_")[-1]))[task_id::array_size]
 
     for i, file in enumerate(input_file):  
@@ -581,7 +582,6 @@ def stage_final(input_path: str | Path,
 
         if sort_by_popcnt:
             print(f"Sorting {file}")
-            out_dir.mkdir(parents=True, exist_ok=True)
             task = file.stem.split("_")[-1]
             batch_output = out_dir / f"sorted_{task}.h5"
             sort_db_file_fast(file, batch_output, compression_level)
