@@ -287,6 +287,9 @@ def stage_create_fingerprints(output_smi: str | Path, fp_type: str, fp_param: di
     
         final_file = TMP_DIR / f"chunk_{chunk_id}.h5"
         tmp_file = TMP_DIR / f"chunk_{chunk_id}.h5.tmp"        
+        if final_file.exists():
+            print(f"[Task {task_id}] Chunk {chunk_id} already exists, skipping")
+            continue
         
         # Clean up any stale temp file
         if tmp_file.exists():
