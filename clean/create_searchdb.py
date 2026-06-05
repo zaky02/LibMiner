@@ -279,9 +279,8 @@ def stage_create_fingerprints(output_smi: str | Path, fp_type: str, fp_param: di
     
     # Calculate chunks
     chunks = calculate_chunks(total_mols, chunk_num, m=1)
-    chunk_list = list(enumerate(chunks))[task_id::array_size]
     # Filter out already processed chunks (by task ID and existing files)
-    chunk_list = filter(lambda x: f"{x[0]}" not in processed_chunks + done_files, chunk_list)
+    chunk_list = list(filter(lambda x: f"{x[0]}" not in processed_chunks + done_files, enumerate(chunks)))[task_id::array_size]
     
     for chunk_id, chunk in chunk_list:
     
