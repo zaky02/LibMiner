@@ -272,12 +272,12 @@ def stage_create_fingerprints(output_smi: str | Path, fp_type: str, fp_param: di
     TMP_DIR.mkdir(exist_ok=True)
     
     # Count total molecules
+    processed_chunks = read_logs()
+    done_files = [f.stem.split('_')[-1] for f in TMP_DIR.glob("chunk_*.h5")]
     total_mols = count_rows(output_smi)
     print(f"[Task {task_id}] Total molecules: {total_mols}")
     
     # Calculate chunks
-    processed_chunks = read_logs()
-    done_files = [f.stem.split('_')[-1] for f in TMP_DIR.glob("chunk_*.h5")]
     chunks = calculate_chunks(total_mols, chunk_num, m=1)
     chunk_list = list(enumerate(chunks))[task_id::array_size]
     # Filter out already processed chunks (by task ID and existing files)
