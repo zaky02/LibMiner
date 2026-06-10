@@ -60,7 +60,7 @@ def sort_function(x: str | Path) -> tuple[int, int]:
 
 
 def convert_parquet_to_smi_chunk(parquet_path: str | Path, out_dir: str | Path, 
-                                 smiles_col: str="nostereo_SMILES", 
+                                 smiles_col: str="SMILES", 
                                  id_col: str="num_ID", 
                                  batch_size: int=100_000):
     """
@@ -77,10 +77,13 @@ def convert_parquet_to_smi_chunk(parquet_path: str | Path, out_dir: str | Path,
     
     with open(smi_temp, "w", encoding="utf-8") as f:
         for batch in parquet_file.iter_batches(columns=[smiles_col, id_col], batch_size=batch_size):
-            smiles = batch.column(smiles_col).cast(pa.string())
-            ids = batch.column(id_col).cast(pa.string())
-            lines = pc.binary_join_element_wise(smiles, ids, "\n", " ")
-            f.writelines(lines.to_pylist())
+            smiles_list = batch.column(smiles_col).to_pylist()
+            ids_list = batch.column(id_col).to_pylist()
+            f.writelines(
+                f"{smi.strip('"\'')} {id_}\n"
+                for smi, id_ in zip(smiles_list, ids_list)
+                if smi is not None
+            )
             
     print(f"Completed {smi_temp}")
     return str(smi_temp)
