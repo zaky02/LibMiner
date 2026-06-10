@@ -545,7 +545,7 @@ def main():
             subset_not_indb = pd.DataFrame({"query": query_not_indb, "ID": 0, "SMILES": 0, "db_id": 0, 
                                    "Tanimoto": 0}).set_index(["query", "SMILES"])
             
-            pd.concat([subset_not_indb, smiles]).to_csv(output_file)
+            pd.concat([smiles, subset_not_indb]).to_csv(output_file)
             
         case other:
             raise NotImplementedError(f"Unknown stage {other}, expected 'search' or 'retrieve'")

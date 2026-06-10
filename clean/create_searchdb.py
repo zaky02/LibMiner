@@ -43,7 +43,7 @@ def parse_args():
     parser.add_argument('-idb', '--input_searchdb', type=str, help='The input search db for the indexing and sorting', 
                         required=False, default='tmp_chunks')
     parser.add_argument('-cn','--chunk_num', type=int, help='number of chunks', required=False,
-                        default=255)
+                        default=270)
     
     args = parser.parse_args()
     return args.output_smi, args.input_path, args.batch_size, args.fp_param, args.fp_type, args.stage, args.output_searchdb, args.compression_level, args.input_searchdb, args.chunk_num
