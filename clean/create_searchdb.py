@@ -13,7 +13,7 @@ import argparse
 import pyarrow.parquet as pq
 from FPSim2.scripts.create_fpsim2_fp_db import count_rows, calculate_chunks, read_chunk, create_db_file
 from FPSim2.io.chem import get_fp_length
-from FPSim2.io.backends.pytables import create_schema, sort_db_file
+from FPSim2.io.backends.pytables import create_schema, sort_db_file, calc_popcnt_bins_pytables
 import tables as tb
 import json
 import pyarrow.compute as pc
@@ -36,7 +36,7 @@ def parse_args():
                         default={"radius": 2, "fpSize": 1024})
     parser.add_argument('-ft','--fp_type', type=str, help='Fingerprint type supported by FPSim2', required=False,
                         default="Morgan")
-    parser.add_argument('-s', '--stage', type=str, choices=['convert', 'fingerprint', 'merge_smi', 'merge_batches', "index", "sort"], help='Processing stage', required=True)
+    parser.add_argument('-s', '--stage', type=str, choices=['convert', 'fingerprint', 'merge_smi', "index", "sort"], help='Processing stage', required=True)
     parser.add_argument('-os', '--output_searchdb', type=str, help='The output database folder path', 
                         required=False, default='Molecular_database/search_db')
     parser.add_argument('-c','--compression_level', type=int, help='The compression level for the sorted database, the lower the faster it seems', required=False, default=9)
@@ -60,7 +60,7 @@ def sort_function(x: str | Path) -> tuple[int, int]:
 
 
 def convert_parquet_to_smi_chunk(parquet_path: str | Path, out_dir: str | Path, 
-                                 smiles_col: str="SMILES", 
+                                 smiles_col: str="nostereo_SMILES", 
                                  id_col: str="num_ID", 
                                  batch_size: int=100_000):
     """
@@ -199,67 +199,7 @@ def create_index_on_existing_file(batch_output: Path | str,
         # Clean up temp directory
     if tmp_dir.exists() and not any(tmp_dir.iterdir()):
         tmp_dir.rmdir()
-
-
-def merge_db_files(
-    input_files: list[str], output_file: str
-) -> None:
-    """Merges multiple FPs db files into a new one.
-
-    Parameters
-    ----------
-    input_files : List[str]
-        List of paths to input files
-    output_file : str
-        Path to output merged file
-    sort_by_popcnt : bool, optional
-        Whether to sort the output file by population count, by default True
-    """
-    if len(input_files) < 2:
-        raise ValueError("At least two input files are required for merging")
-
-    # Check that all files have same fingerprint type, parameters and RDKit version
-    reference_configs = None
-    for file in input_files:
-        with tb.open_file(file, mode="r") as f:
-            current_configs = (
-                f.root.config[0],
-                f.root.config[1],
-                f.root.config[2],
-                f.root.config[3],
-            )
-            if reference_configs is None:
-                reference_configs = current_configs
-            elif current_configs != reference_configs:
-                raise ValueError(
-                    f"File {file} has different fingerprint types, parameters or RDKit versions"
-                )
-
-    # Create new file with same parameters
-    filters = tb.Filters(complib="blosc2", complevel=9, fletcher32=False)
-    fp_type, fp_params, original_rdkit_ver, original_fpsim2_ver = reference_configs
-    fp_length = get_fp_length(fp_type, fp_params)
-
-    with tb.open_file(output_file, mode="w") as out_file:
-        particle = create_schema(fp_length)
-        fps_table = out_file.create_table(
-            out_file.root, "fps", particle, "Table storing fps", filters=filters
-        )
-
-        # Copy config with original RDKit version
-        param_table = out_file.create_vlarray(
-            out_file.root, "config", atom=tb.ObjectAtom()
-        )
-        param_table.append(fp_type)
-        param_table.append(fp_params)
-        param_table.append(original_rdkit_ver)
-        param_table.append(original_fpsim2_ver)
-
-        # Copy data from all input files (appending one by one)
-        for file in input_files:
-            with tb.open_file(file, mode="r") as in_file:
-                fps_table.append(in_file.root.fps[:])
-                
+       
             
 def stage_create_fingerprints(output_smi: str | Path, fp_type: str, fp_param: dict,
                               chunk_num: int = 255):
@@ -267,7 +207,7 @@ def stage_create_fingerprints(output_smi: str | Path, fp_type: str, fp_param: di
     
     # Get SLURM array task ID
     task_id = int(os.environ.get('SLURM_ARRAY_TASK_ID', 0))
-    array_size = int(os.environ.get('SLURM_ARRAY_TASK_COUNT', 1))
+    array_size = int(os.environ.get('SLURM_ARRAY_TASK_COUNT', 0))
     
     print(f"[Task {task_id}/{array_size}] Starting fingerprint generation")
     
@@ -283,8 +223,10 @@ def stage_create_fingerprints(output_smi: str | Path, fp_type: str, fp_param: di
     # Calculate chunks
     chunks = calculate_chunks(total_mols, chunk_num, m=1)
     # Filter out already processed chunks (by task ID and existing files)
-    chunk_list = list(filter(lambda x: f"{x[0]}" not in processed_chunks + done_files, enumerate(chunks)))[task_id::array_size]
-    
+    chunk_list = list(filter(lambda x: f"{x[0]}" not in processed_chunks + done_files, enumerate(chunks)))
+    if array_size:
+        chunk_list = chunk_list[task_id::array_size]
+        
     for chunk_id, chunk in chunk_list:
     
         final_file = TMP_DIR / f"chunk_{chunk_id}.h5"
@@ -322,47 +264,12 @@ def stage_create_fingerprints(output_smi: str | Path, fp_type: str, fp_param: di
                 tmp_file.unlink()
             sys.exit(1)
 
-
-def stage_merge_fingerprints(output_path: str | Path = "Molecular_database/search_db"):
-    """Stage 4: Merge fingerprint chunks into final database (single job)"""
-    
-    task_id = int(os.environ.get('SLURM_ARRAY_TASK_ID', 0))
-    array_size = int(os.environ.get('SLURM_ARRAY_TASK_COUNT', 1))
-        
-    TMP_DIR = Path("tmp_chunks")
-    MERGE_DIR = Path(output_path)
-    MERGE_DIR.mkdir(exist_ok=True)
-    # We need to know how many chunks were created
-    chunk_files = sorted(TMP_DIR.glob("chunk_*.h5"), 
-                         key=lambda x: int(x.stem.split('_')[-1]))
-    
-    if not chunk_files:
-        print("ERROR: No chunk files found")
-        sys.exit(1)
-    
-    print(f"Found {len(chunk_files)} chunk files")
-    
-    my_chunks = chunk_files[task_id::array_size]
-    batch_output = MERGE_DIR / f"batch_{task_id}.h5"
-    
-    # Skip if already done
-    if batch_output.exists():
-        print(f"[Task {task_id}] Batch already exists, skipping")
-        return
-    
-    print(f"[Task {task_id}] Merging {len(my_chunks)} chunks into batch_{task_id}.h5")
-    
-    # Merge WITHOUT sorting (sorting is slow and done only once at the end)
-    merge_db_files([str(f) for f in my_chunks], str(batch_output))
-    
-    print(f"[Task {task_id}] Batch merge complete")
-
   
 def calc_popcnt_bins_fast(fps, fp_length: int) -> list[tuple[int, tuple[int, int]]]:
     """
     Fast popcnt bin calculation using streaming (memory-efficient for billions of molecules).
     
-    Original implementation: O(n × fp_length) - scans table once per popcnt value (513 scans!)
+    Original implementation: O(n x fp_length) - scans table once per popcnt value (513 scans!)
     This implementation: O(n) - single streaming pass through sorted table
     
     Speedup: 100-500x faster, works with any database size
@@ -452,19 +359,11 @@ def sort_db_file_fast(
         - 9: Slow, smallest files
     verbose : bool, optional
         Print progress information
-    """
-    if verbose:
-        print(f"\n{'='*60}")
-        print("Optimized Database Sorting")
-        print(f"{'='*60}")
-        print(f"File: {filename}")
-        print(f"Compression level: {compression_level}")
-    
+    """   
     start_time = time.time()
     
     # Rename unsorted file
     tmp_filename = filename
-
     
     if os.path.exists(tmp_filename) and os.path.exists(out_file):
         os.remove(out_file)
@@ -528,10 +427,6 @@ def sort_db_file_fast(
             param_table.append(rdkit.__version__)
             param_table.append(__version__)
             
-            # Calculate popcnt bins using fast method
-            if verbose:
-                print(f"\nStep 2/2: Calculating popcnt bins...")
-            
             bins_start = time.time()
             popcnt_bins = calc_popcnt_bins_fast(dst_fps, fp_length)
             bins_time = time.time() - bins_start
@@ -539,6 +434,7 @@ def sort_db_file_fast(
             param_table.append(popcnt_bins)
             
             if verbose:
+                print(f"  Creating sort db")
                 print(f"  Found {len(popcnt_bins)} popcnt bins")
                 print(f"  Completed in {bins_time:.1f}s")
         
@@ -554,15 +450,10 @@ def sort_db_file_fast(
             print(f"  Copy/sort: {copy_time:.1f}s ({copy_time/total_time*100:.1f}%)")
             print(f"  Popcnt bins: {bins_time:.1f}s ({bins_time/total_time*100:.1f}%)")
             
-            # Show file size
-            file_size_mb = os.path.getsize(out_file) / (1024 * 1024)
-            print(f"Output file size: {file_size_mb:.1f} MB")
-            print(f"{'='*60}\n")
-    
     except Exception as e:
-        raise e
-   
-
+        raise e       
+ 
+            
 def stage_final(input_path: str | Path,
                 output_path: str | Path = "Molecular_database/search_db", 
                 sort_by_popcnt: bool = False,
@@ -593,7 +484,7 @@ def stage_final(input_path: str | Path,
             safe_append(f"{task} moved\n", task_id)
             
     print(f"Fingerprint database created at {out_dir}")         
-            
+     
 
 def safe_append(message, task_id):
     """Append a message to the results file"""
@@ -624,8 +515,6 @@ def main():
         stage_merge_smi(input_path, output_smi)
     elif stage == 'fingerprint':
         stage_create_fingerprints(output_smi, fp_type, fp_param, chunk_num)
-    elif stage == 'merge_batches':
-        stage_merge_fingerprints(output_searchdb)
     elif stage == 'sort' or stage == 'index':
         stage_final(input_searchdb, output_searchdb, sort_by_popcnt=(stage == 'sort'), compression_level=compression_level)
     else:

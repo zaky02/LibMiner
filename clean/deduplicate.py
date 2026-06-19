@@ -6,9 +6,9 @@ For the second time you have to change the following options:
 - --use_cols nostereo_SMILES db_id
 - --drop_cols nostereo_SMILES
 - --assign_ids (to set it to true)
-- --meta '{"nostereo_SMILES": "string", "num_ID": "int64", "db_id": "string"}'
-- --input_path to the output_path of the first deduplication, if default would be 'Molecular_database/deduplicated'
-- --output_path to a different folder, for example 'Molecular_database/deduplicated_nostereo'
+- --meta '{"nostereo_SMILES": "string", "db_id": "string", "num_ID": "int64"}'
+- --input_path to the output_path of the first deduplication, if default would be 'Molecular_database/deduplicate_canonical'
+- --output_path to a different folder, for example 'Molecular_database/deduplicate_nostereo'
 
 """
 from pathlib import Path
@@ -22,6 +22,7 @@ import pandas as pd
 import gc
 import json
 from itertools import pairwise
+import shutil
 
 
 def parse_args():
@@ -36,7 +37,7 @@ def parse_args():
                         help='The number of rows for each partition and file', 
                         required=False, default=10_000_000)
     parser.add_argument("-c", "--use_cols", nargs="+", help="Columns to read", required=False, 
-                        default=["ID", "SMILES", "nostereo_SMILES", "db_id"])
+                        default=["ID", "SMILES", "db_id", "nostereo_SMILES"])
     parser.add_argument("-d", "--drop_cols", type=str, help="Column to drop the duplicate", required=False, 
                         default='SMILES')
     parser.add_argument('-a','--assign_ids', action='store_true', help='Whether to assign unique numerical IDs', required=False)
@@ -80,11 +81,11 @@ def make_name_function(hac: int):
     return name_function
 
 
-def deduplicator(hac_folders: Path | str, 
+def deduplicator_previous(hac_folders: Path | str, 
                  out_path: Path | str, 
                  block_size: str = "64MB", 
                  repartition_size: str = 10_000_000,
-                 use_cols: tuple[str] = ("ID", "SMILES", "nostereo_SMILES", "db_id"), 
+                 use_cols: tuple[str] = ("ID", "SMILES", "db_id", "nostereo_SMILES"), 
                  current_offset: int = 0, 
                  drop: str="SMILES",
                  if_assign_ids: bool=False,
@@ -134,6 +135,67 @@ def deduplicator(hac_folders: Path | str,
     del ddf_merged
     client.run(gc.collect)
     
+    return count
+
+def deduplicator(
+            hac_folders: Path | str, 
+            out_path: Path | str, 
+            block_size: str = "64MB", 
+            repartition_size: str = 10_000_000,
+            use_cols: tuple[str] = ("ID", "SMILES", "db_id", "nostereo_SMILES"), 
+            current_offset: int = 0, 
+            drop: str="SMILES",
+            if_assign_ids: bool=False,
+            meta: dict = {"ID": "string", "SMILES": "string", 
+                        "db_id": "string", "nostereo_SMILES": "string"},
+            ) -> int:
+
+    hac_folders = Path(hac_folders)
+    out_path = Path(out_path)
+    hac = hac_folders.name.split("_")[-1]
+
+    ddf = (
+        dd.read_parquet(f"{hac_folders}/*.parquet", blocksize=block_size, columns=list(use_cols))
+        .drop_duplicates(subset=drop)
+    )
+
+    # ── IDs needed: materialise first, reread for stable partitions ──────────
+    if if_assign_ids:
+        tmp_path = out_path / f"HAC_{hac}_tmp"
+        ddf.to_parquet(tmp_path, write_index=False, compute=True, engine="pyarrow")
+        del ddf
+        client.run(gc.collect)
+
+        ddf = dd.read_parquet(f"{tmp_path}/*.parquet")
+        partition_lengths = ddf.map_partitions(len).compute()
+        count = int(sum(partition_lengths))
+
+        if count == 0:
+            shutil.rmtree(tmp_path)
+            return 0
+
+        partition_offsets = np.insert(np.cumsum(partition_lengths[:-1]), 0, 0)
+        ddf = assign_ids(ddf, partition_offsets, current_offset, meta)
+    else:
+        count = int(sum(ddf.map_partitions(len).compute()))
+        if count == 0:
+            return 0
+
+    # ── Write final output ───────────────────────────────────────────────────
+    n = max(1, int(count / repartition_size))
+    ddf.repartition(npartitions=n).to_parquet(
+        out_path / f"HAC_{hac}",
+        write_index=False,
+        compute=True,
+        engine="pyarrow",
+        name_function=make_name_function(hac=int(hac)),
+    )
+
+    if if_assign_ids:
+        shutil.rmtree(tmp_path)
+
+    del ddf
+    client.run(gc.collect)
     return count
 
 # -------------------------

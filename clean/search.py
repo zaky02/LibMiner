@@ -49,10 +49,6 @@ class FPSim2Query:
     on_disk: bool=False
     
     @property
-    def fpe(self) -> FPSim2Engine:
-        return FPSim2Engine(self.db_name, in_memory_fps=False if self.on_disk else True)
-    
-    @property
     def queries(self) -> list[str]:
         if isinstance(self.query, str):
             return [self.query]
@@ -63,10 +59,11 @@ class FPSim2Query:
         threshold: float = 0.7):
         """Perform similarity search using FPSIM2"""
         search = {}
+        fpe = FPSim2Engine(self.db_name, in_memory_fps=False if self.on_disk else True)
         method = (
-        self.fpe.on_disk_similarity
+        fpe.on_disk_similarity
         if self.on_disk
-        else self.fpe.similarity
+        else fpe.similarity
         )
         
         for que in self.queries:
@@ -428,7 +425,7 @@ class IsomerRetriever:
                 all_isomers["nostereo_SMILES"].isin(df["nostereo_SMILES"])
             ]
             tanimoto_lookup = df[["nostereo_SMILES", "Tanimoto"]]
-            subset = subset.merge(tanimoto_lookup, how="left", on="nostereo_SMILES").drop(columns=["nostereo_SMILES"]).set_index("SMILES").sort_values("Tanimoto", ascending=False)
+            subset = subset.merge(tanimoto_lookup, how="left", on="nostereo_SMILES").set_index("SMILES").sort_values("Tanimoto", ascending=False)
 
             result[query] = subset
 
@@ -466,9 +463,11 @@ def process_query_by_db(db_name: str, query: str | list[str],
                         outpath: Path = Path("search_results")):
     
     task_id = int(os.environ.get('SLURM_ARRAY_TASK_ID', 0))
-    array_size = int(os.environ.get('SLURM_ARRAY_TASK_COUNT', 1))
+    array_size = int(os.environ.get('SLURM_ARRAY_TASK_COUNT', 0))
     
-    my_chunk = list(Path(db_name).glob("*.h5"))[task_id::array_size]
+    my_chunk = list(Path(db_name).glob("*.h5"))
+    if array_size:
+        my_chunk = my_chunk[task_id::array_size]
     
     for db in my_chunk:
         db_task = int(db.stem.split('_')[-1]) 
@@ -532,6 +531,7 @@ def main():
             search_results = read_search_results(top_k, search_type, outpath=outpath)
             retrieve = SmilesRetriever(index_file, molecular_database, mw_range, hac_limits)
             smiles = retrieve.run(search_results, search_type)
+            pd.concat(smiles).to_csv(f"{query_path.parent}/{query_path.stem}_nostereo_smiles.csv")
             if search_type == "substructure":
                 smiles = match_substructure(query, smiles, num_workers)
             retrieve_isomers = IsomerRetriever(deduplicated_database, pairwise_database, 

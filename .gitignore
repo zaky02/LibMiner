@@ -9,3 +9,5 @@ clean/test*
 clean/hac*
 clean/files
 clean/search_db
+tmp*
+*txt
