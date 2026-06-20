@@ -39,8 +39,9 @@ def parse_args():
                         help='Dictionary mapping commercial database names to their IDs', required=False, 
                         default={"enamine": "001", "wuxi": "014", "mcule": "006", "molport": "013", "zinc": "002"})
     parser.add_argument("-s", "--stage", choices=("search", "retrieve"), default="search", help="Runing search or retrieve")
+    parser.add_argument('-ch','--chunk_size', type=int, help='The chunck size for the tanimoto search', required=False, default=2_000_000)
     args = parser.parse_args()
-    return args.db_name, args.nostereo_database, args.index_file, args.top_k, args.threshold, args.num_workers, args.query_path, args.hac_limits, args.mw_range, args.search_type, args.deduplicated_database, args.commercially_avaliable, args.commercial_databases, args.pairwise_database, args.cdb_id, args.stage
+    return args.db_name, args.nostereo_database, args.index_file, args.top_k, args.threshold, args.num_workers, args.query_path, args.hac_limits, args.mw_range, args.search_type, args.deduplicated_database, args.commercially_avaliable, args.commercial_databases, args.pairwise_database, args.cdb_id, args.stage, args.chunk_size
 
 
 
@@ -597,7 +598,8 @@ def process_query_by_db(db_name: str, query: str | list[str],
                         num_workers: int=50, 
                         threshold: float = 0.7, 
                         search_type: str = "similarity",
-                        outpath: Path = Path("search_results")):
+                        outpath: Path = Path("search_results"),
+                        chunk_size=2_000_000):
     
     task_id = int(os.environ.get('SLURM_ARRAY_TASK_ID', 0))
     array_size = int(os.environ.get('SLURM_ARRAY_TASK_COUNT', 0))
@@ -615,7 +617,7 @@ def process_query_by_db(db_name: str, query: str | list[str],
             continue
         
         fp = FPSim2Query(query=query, db_name=db, workers=num_workers)
-        search = {"similarity": partial(fp.similarity_search, threshold=threshold), 
+        search = {"similarity": partial(fp.similarity_search, threshold=threshold, chunk_size=chunk_size), 
                   "substructure": fp.substructure_screenout}    
         
         search_results = search[search_type]()
@@ -651,7 +653,7 @@ def read_search_results(top_k: None | int = None,
 
 
 def main():
-    db_name, molecular_database, index_file, top_k, threshold, num_workers, query_path, hac_limits, mw_range, search_type, deduplicated_database, commercially_avaliable, commercial_databases, pairwise_database, cdb_id, stage = parse_args()
+    db_name, molecular_database, index_file, top_k, threshold, num_workers, query_path, hac_limits, mw_range, search_type, deduplicated_database, commercially_avaliable, commercial_databases, pairwise_database, cdb_id, stage,chunk_size = parse_args()
    
     query_path = Path(query_path)
     with open(query_path) as w:
@@ -662,7 +664,7 @@ def main():
     
     match stage:    
         case "search":
-            process_query_by_db(db_name, query, num_workers, threshold, search_type, outpath=outpath)
+            process_query_by_db(db_name, query, num_workers, threshold, search_type, outpath=outpath, chunk_size=chunk_size)
             
         case "retrieve": 
             search_results = read_search_results(top_k, search_type, outpath=outpath)
