@@ -39,7 +39,7 @@ def parse_args():
                         help='Dictionary mapping commercial database names to their IDs', required=False, 
                         default={"enamine": "001", "wuxi": "014", "mcule": "006", "molport": "013", "zinc": "002"})
     parser.add_argument("-s", "--stage", choices=("search", "retrieve"), default="search", help="Runing search or retrieve")
-    parser.add_argument('-ch','--chunk_size', type=int, help='The chunck size for the tanimoto search', required=False, default=2_000_000)
+    parser.add_argument('-ch','--chunk_size', type=int, help='The chunck size for the tanimoto search', required=False, default=10_000_000)
     args = parser.parse_args()
     return args.db_name, args.nostereo_database, args.index_file, args.top_k, args.threshold, args.num_workers, args.query_path, args.hac_limits, args.mw_range, args.search_type, args.deduplicated_database, args.commercially_avaliable, args.commercial_databases, args.pairwise_database, args.cdb_id, args.stage, args.chunk_size
 
@@ -86,7 +86,7 @@ def tanimoto_chunk(
 class ManualTanimoto:
     h5_path: str
     n_workers: int = 4
-    chunk_size: int = 2_000_000
+    chunk_size: int = 10_000_000
     fp_type: str = "ecfp"
 
     def smiles_to_query_chunks(self, smiles: str, **finger_params) -> tuple[np.ndarray, int]:
@@ -203,7 +203,7 @@ class FPSim2Query:
     def similarity_search(
         self,
         threshold: float = 0.7,
-        chunk_size=2_000_000,
+        chunk_size=10_000_000,
         fp_type: str = "ecfp",
             ):
         """Perform similarity search using FPSIM2"""
@@ -599,7 +599,7 @@ def process_query_by_db(db_name: str, query: str | list[str],
                         threshold: float = 0.7, 
                         search_type: str = "similarity",
                         outpath: Path = Path("search_results"),
-                        chunk_size=2_000_000):
+                        chunk_size=10_000_000):
     
     task_id = int(os.environ.get('SLURM_ARRAY_TASK_ID', 0))
     array_size = int(os.environ.get('SLURM_ARRAY_TASK_COUNT', 0))
