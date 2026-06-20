@@ -8,6 +8,7 @@ import numpy as np
 from dataclasses import dataclass
 from typing import Sequence
 from collections import defaultdict
+import tables as tb
 
 
 def convert_folder(hac_folders: Path | str, keep: list[str] = []) -> dict[str, list[Path]]:
@@ -170,3 +171,45 @@ class Rerank:
         features_df["distances"] = distances
          
         return features_df.sort_values("distances")
+
+
+
+def decode_fp_row(row: np.void, fp_fields: list[str]) -> np.ndarray:
+    chunks = np.array([row[f] for f in fp_fields], dtype=np.uint64)
+    chunks = chunks.byteswap()  # ← fix: little-endian → big-endian bytes
+    return np.unpackbits(chunks.view(np.uint8), bitorder="big")
+
+
+def decode_all_fps(h5_path: str) -> tuple[np.ndarray, np.ndarray]:
+    with tb.open_file(h5_path, "r") as f:
+        raw = f.root.fps[:]
+        fp_fields = [n for n in raw.dtype.names if n not in ("fp_id", "popcnt")]
+
+    fp_ids = raw["fp_id"]
+    chunks = np.stack([raw[f] for f in fp_fields], axis=1).astype(np.uint64)
+    chunks = chunks.byteswap()  # ← fix
+
+    raw_bytes = chunks.view(np.uint8).reshape(len(raw), -1)
+    fps = np.unpackbits(raw_bytes, axis=1, bitorder="big")
+
+    return fp_ids, fps
+
+def encode_fps_batch(
+    fps: np.ndarray,
+    fp_ids: np.ndarray,
+    fp_fields: list[str],
+) -> np.ndarray:
+    n = len(fps)
+    packed_bytes = np.packbits(fps.astype(np.uint8), axis=1, bitorder="big")
+    chunks = packed_bytes.view(np.uint64).byteswap()  # ← fix: back to little-endian
+
+    popcnts = fps.sum(axis=1).astype(np.int64)
+    dtype = [("fp_id", "<i8")] + [(f, "<u8") for f in fp_fields] + [("popcnt", "<i8")]
+
+    out = np.empty(n, dtype=dtype)
+    out["fp_id"]  = fp_ids.astype(np.int64)
+    out["popcnt"] = popcnts
+    for i, f in enumerate(fp_fields):
+        out[f] = chunks[:, i]
+
+    return out

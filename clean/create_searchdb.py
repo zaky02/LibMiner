@@ -41,7 +41,7 @@ def parse_args():
                         required=False, default='Molecular_database/search_db')
     parser.add_argument('-c','--compression_level', type=int, help='The compression level for the sorted database, the lower the faster it seems', required=False, default=9)
     parser.add_argument('-idb', '--input_searchdb', type=str, help='The input search db for the indexing and sorting', 
-                        required=False, default='tmp_chunks')
+                        required=False, default='indexed_chunks')
     parser.add_argument('-cn','--chunk_num', type=int, help='number of chunks', required=False,
                         default=270)
     
@@ -211,7 +211,7 @@ def stage_create_fingerprints(output_smi: str | Path, fp_type: str, fp_param: di
     
     print(f"[Task {task_id}/{array_size}] Starting fingerprint generation")
     
-    TMP_DIR = Path("tmp_chunks")
+    TMP_DIR = Path("indexed_chunks")
     TMP_DIR.mkdir(exist_ok=True)
     
     # Count total molecules
