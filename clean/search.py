@@ -15,7 +15,7 @@ import os
 import gc
 import pickle as pk
 import tables as tb
-from typing import Generator
+import atexit
 from multiprocessing import Pool
 
 
@@ -39,7 +39,7 @@ def parse_args():
                         help='Dictionary mapping commercial database names to their IDs', required=False, 
                         default={"enamine": "001", "wuxi": "014", "mcule": "006", "molport": "013", "zinc": "002"})
     parser.add_argument("-s", "--stage", choices=("search", "retrieve"), default="search", help="Runing search or retrieve")
-    parser.add_argument('-ch','--chunk_size', type=int, help='The chunck size for the tanimoto search', required=False, default=10_000_000)
+    parser.add_argument('-ch','--chunk_size', type=int, help='The chunck size for the tanimoto search', required=False, default=150_000)
     args = parser.parse_args()
     return args.db_name, args.nostereo_database, args.index_file, args.top_k, args.threshold, args.num_workers, args.query_path, args.hac_limits, args.mw_range, args.search_type, args.deduplicated_database, args.commercially_avaliable, args.commercial_databases, args.pairwise_database, args.cdb_id, args.stage, args.chunk_size
 
@@ -81,12 +81,89 @@ def tanimoto_chunk(
         for fp_id, score in zip(batch["fp_id"][mask], scores[mask])
     ]
 
+# ── Worker-global state ─────────────────────────────────────────────────────────
+_worker_table = None
+_worker_file = None
+
+
+def _init_worker(h5_path: str) -> None:
+    global _worker_table, _worker_file
+    _worker_file = tb.open_file(h5_path, mode="r")
+    _worker_table = _worker_file.root.fps
+
+    def _cleanup():
+        global _worker_file
+        if _worker_file is not None and _worker_file.isopen:
+            _worker_file.close()
+
+    atexit.register(_cleanup)
+
+def _score_batch(
+    batch: np.ndarray,
+    query_chunks: np.ndarray,
+    threshold: float,
+    fp_fields: list[str],
+) -> list[tuple[int, float]]:
+    """Compute Tanimoto for a small in-memory batch and filter by threshold."""
+    db_chunks = np.stack(
+        [batch[f] for f in fp_fields], axis=1
+    ).astype(np.dtype("<u8"))
+
+    a_and_b = np.bitwise_and(db_chunks, query_chunks)
+    a_or_b  = np.bitwise_or(db_chunks,  query_chunks)
+
+    def popcnt_rows(x):
+        return np.unpackbits(
+            np.ascontiguousarray(x).view(np.uint8), axis=1, bitorder="big"
+        ).sum(axis=1, dtype=np.float32)
+
+    scores = popcnt_rows(a_and_b) / popcnt_rows(a_or_b)
+    mask = scores >= threshold
+
+    return [
+        (int(fp_id), round(float(score), 4))
+        for fp_id, score in zip(batch["fp_id"][mask], scores[mask])
+    ]
+
+
+def _process_row_range(
+    args: tuple[int, int, int, int, np.ndarray, float, list[str], int]
+) -> list[tuple[int, float]]:
+    """
+    Worker task — streams its OWN row range with where(), scoring in
+    bounded-size sub-batches. Never materializes the full range at once.
+    """
+    start_row, end_row, lower, upper, query_chunks, threshold, fp_fields, sub_chunk_size = args
+
+    colnames = _worker_table.colnames
+    dtype    = _worker_table.dtype
+
+    results = []
+    buffer = []
+
+    for row in _worker_table.where(
+        f"(popcnt >= {lower}) & (popcnt <= {upper})",
+        start=start_row, stop=end_row,
+    ):
+        # MUST extract values now — Row object is invalidated on next iteration
+        buffer.append(tuple(row[name] for name in colnames))
+
+        if len(buffer) >= sub_chunk_size:
+            batch = np.array(buffer, dtype=dtype)
+            results.extend(_score_batch(batch, query_chunks, threshold, fp_fields))
+            buffer = []  # free memory immediately
+
+    if buffer:  # flush remainder
+        batch = np.array(buffer, dtype=dtype)
+        results.extend(_score_batch(batch, query_chunks, threshold, fp_fields))
+
+    return results
 
 @dataclass
 class ManualTanimoto:
     h5_path: str
     n_workers: int = 4
-    chunk_size: int = 10_000_000
+    chunk_size: int = 150_000
     fp_type: str = "ecfp"
 
     def smiles_to_query_chunks(self, smiles: str, **finger_params) -> tuple[np.ndarray, int]:
@@ -108,7 +185,6 @@ class ManualTanimoto:
             .astype(np.dtype("<u8"))  # convert to little-endian to match DB
         )
         return chunks, int(bits.sum())
-
     
     def get_info_from_db(self, h5_path: str) -> int:
         """Read the true fingerprint bit size from the FPSim2 file metadata."""
@@ -128,62 +204,42 @@ class ManualTanimoto:
         upper = int(np.ceil(query_popcnt / threshold))
         return lower, upper
     
-    def _get_candidate_indices(self, lower: int, upper: int) -> np.ndarray:
-        """
-        Fetch all matching row indices in one shot — cheap, no data loaded.
-        """
+    def _row_ranges(self) -> list[tuple[int, int]]:
+        """Split the table into n_workers contiguous row ranges (not by candidate count)."""
         with tb.open_file(self.h5_path, mode="r") as f:
-            indices = f.root.fps.get_where_list(
-                f"(popcnt >= {lower}) & (popcnt <= {upper})"
-            )
-        return indices
+            n_rows = f.root.fps.shape[0]
 
-    def _iter_batches(self, indices: np.ndarray) -> Generator[np.ndarray, None, None]:
-        """
-        Split indices into chunks for parallel dispatch.
-        """
-        for start in range(0, len(indices), self.chunk_size):
-            yield indices[start : start + self.chunk_size]
-
+        bounds = np.linspace(0, n_rows, self.n_workers + 1, dtype=np.int64)
+        return list(zip(bounds[:-1].tolist(), bounds[1:].tolist()))
+    
     def tanimoto_search(
         self,
         smiles: str,
         threshold: float = 0.7,
     ) -> list[tuple[int, float]]:
         """
-        Search an FPSim2 shard for molecules above a Tanimoto threshold.
-        Parallelised across n_workers processes, each handling one chunk.
-
-        Returns
-        -------
-        list of (fp_id, tanimoto) sorted by score descending
+        Memory-bounded parallel Tanimoto search.
+        Each worker streams its own row range — never materializes the full
+        filtered set, regardless of how many billions of rows match.
         """
         fp_fields, finger_params = self.get_info_from_db(self.h5_path)
         query_chunks, query_popcnt = self.smiles_to_query_chunks(smiles, **finger_params)
         lower, upper = self.bitbounds(query_popcnt, threshold)
 
-        print(f"Query popcnt : {query_popcnt}")
-        print(f"Popcnt range : [{lower}, {upper}]")
-        print(f"Fingerprint parameters : {finger_params}")
-        
-        indices = self._get_candidate_indices(lower, upper)
-        print(f"Total candidates: {len(indices)}, workers: {self.n_workers}")
+        ranges = self._row_ranges()
+        print(f"Query popcnt: {query_popcnt}, popcnt range: [{lower}, {upper}]")
+        print(f"Workers: {self.n_workers}, row ranges: {len(ranges)}")
 
-        # Build args for each chunk — each worker gets its own slice of indices
-        chunk_args = [
-            (self.h5_path, batch, query_chunks, threshold, fp_fields)
-            for batch in self._iter_batches(indices)
-        ]
+        args = [(start, end, lower, upper, query_chunks, threshold, fp_fields, self.chunk_size)
+            for start, end in ranges]
 
-        with Pool(processes=self.n_workers) as pool:
-            chunk_results = pool.map(tanimoto_chunk, chunk_args)
+        with Pool(processes=self.n_workers, initializer=_init_worker, initargs=(self.h5_path,)) as pool:
+            chunk_results = pool.map(_process_row_range, args, chunksize=1)
 
-        # Flatten and sort
         results = sorted(
             [hit for chunk in chunk_results for hit in chunk],
             key=lambda x: -x[1],
         )
-
         print(f"Hits above {threshold}: {len(results)}")
         return results
 
@@ -203,7 +259,7 @@ class FPSim2Query:
     def similarity_search(
         self,
         threshold: float = 0.7,
-        chunk_size=10_000_000,
+        chunk_size=150_000,
         fp_type: str = "ecfp",
             ):
         """Perform similarity search using FPSIM2"""
@@ -595,11 +651,11 @@ def match_substructure(queries: str | list[str],
 
 
 def process_query_by_db(db_name: str, query: str | list[str], 
-                        num_workers: int=50, 
+                        num_workers: int=30, 
                         threshold: float = 0.7, 
                         search_type: str = "similarity",
                         outpath: Path = Path("search_results"),
-                        chunk_size=10_000_000):
+                        chunk_size=150_000):
     
     task_id = int(os.environ.get('SLURM_ARRAY_TASK_ID', 0))
     array_size = int(os.environ.get('SLURM_ARRAY_TASK_COUNT', 0))
