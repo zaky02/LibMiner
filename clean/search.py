@@ -44,43 +44,6 @@ def parse_args():
     return args.db_name, args.nostereo_database, args.index_file, args.top_k, args.threshold, args.num_workers, args.query_path, args.hac_limits, args.mw_range, args.search_type, args.deduplicated_database, args.commercially_avaliable, args.commercial_databases, args.pairwise_database, args.cdb_id, args.stage, args.chunk_size
 
 
-
-def tanimoto_chunk(
-    args: tuple[str, np.ndarray, np.ndarray, float, list[str]]
-) -> list[tuple[int, float]]:
-    """
-    Worker function — runs in a separate process.
-    Opens the file independently, loads its batch, computes Tanimoto.
-
-    Must be a module-level function (not a method) for multiprocessing to pickle it.
-    """
-    h5_path, batch_indices, query_chunks, threshold, fp_fields = args
-
-    with tb.open_file(h5_path, mode="r") as f:
-        batch = f.root.fps[batch_indices]
-
-    db_chunks = np.stack(
-        [batch[f] for f in fp_fields], axis=1
-    ).astype(np.dtype("<u8"))
-
-    a_and_b = np.bitwise_and(db_chunks, query_chunks)
-    a_or_b  = np.bitwise_or(db_chunks,  query_chunks)
-
-    def popcnt_rows(x):
-        return np.unpackbits(
-            np.ascontiguousarray(x).view(np.uint8),
-            axis=1,
-            bitorder="big",
-        ).sum(axis=1, dtype=np.float32)
-
-    scores = popcnt_rows(a_and_b) / popcnt_rows(a_or_b)
-    mask   = scores >= threshold
-
-    return [
-        (int(fp_id), round(float(score), 4))
-        for fp_id, score in zip(batch["fp_id"][mask], scores[mask])
-    ]
-
 # ── Worker-global state ─────────────────────────────────────────────────────────
 _worker_table = None
 _worker_file = None
