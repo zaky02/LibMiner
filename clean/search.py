@@ -122,6 +122,7 @@ def _process_row_range(
 
     return results
 
+
 @dataclass
 class ManualTanimoto:
     h5_path: str
@@ -129,82 +130,88 @@ class ManualTanimoto:
     chunk_size: int = 150_000
     fp_type: str = "ecfp"
 
-    def smiles_to_query_chunks(self, smiles: str, **finger_params) -> tuple[np.ndarray, int]:
-        """
-        Convert SMILES to uint64 chunks compatible with FPSim2 DB.
-
-        Returns
-        -------
-        chunks : shape (fp_size//64,) dtype little-endian uint64
-        popcnt : int
-        """
-        mol  = dm.to_mol(smiles)
-        bits = dm.to_fp(mol, fp_type=self.fp_type, **finger_params)
-        bits = (bits > 0).astype(np.uint8)
-
-        chunks = (
-            np.packbits(bits, bitorder="big")
-            .view(np.dtype(">u8"))    # declare as big-endian
-            .astype(np.dtype("<u8"))  # convert to little-endian to match DB
-        )
-        return chunks, int(bits.sum())
+    # Pool is managed internally — not exposed to the user
+    _pool: Pool = field(default=None, init=False, repr=False)
+    _row_range_cache: list[tuple[int, int]] = field(default=None, init=False, repr=False)
+    _fp_fields: list[str] = field(default=None, init=False, repr=False)
+    _finger_params: dict = field(default=None, init=False, repr=False)
     
-    def get_info_from_db(self, h5_path: str) -> int:
+    def __post_init__(self):
+        self._fp_fields, self._finger_params = self.get_info_from_db()
+        self._start_pool()
+
+    def _start_pool(self) -> None:
+        """Spawn workers, each opening the file once."""
+        self._pool = Pool(
+            processes=self.n_workers,
+            initializer=_init_worker,
+            initargs=(self.h5_path,),
+        )
+        # cache row ranges — table size doesn't change between queries
+        with tb.open_file(self.h5_path, mode="r") as f:
+            n_rows = f.root.fps.shape[0]
+        bounds = np.linspace(0, n_rows, self.n_workers + 1, dtype=np.int64)
+        self._row_range_cache = list(zip(bounds[:-1].tolist(), bounds[1:].tolist()))
+
+    def _stop_pool(self) -> None:
+        """Cleanly shut down workers (triggers atexit cleanup in each)."""
+        if self._pool is not None:
+            self._pool.terminate()
+            self._pool.join()
+            self._pool = None
+
+    # support use as a context manager
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self._stop_pool()
+    
+    def get_info_from_db(self) -> int:
         """Read the true fingerprint bit size from the FPSim2 file metadata."""
-        with tb.open_file(h5_path, "r") as f:
+        with tb.open_file(self.h5_path, "r") as f:
             dtype = f.root.fps.dtype
             finger_params = f.root.config[1]
         fp_fields = [name for name in dtype.names if name not in ("fp_id", "popcnt")]
         return fp_fields, finger_params
 
-    @classmethod
-    def bitbounds(cls, query_popcnt: int, threshold: float) -> tuple[int, int]:
-        """
-        Compute popcnt lower and upper bounds for a given threshold.
-        Any result must satisfy: lower <= popcnt_db <= upper.
-        """
+    def smiles_to_query_chunks(self, smiles: str) -> tuple[np.ndarray, int]:
+        mol = dm.to_mol(smiles)
+        bits = dm.to_fp(mol, fp_type=self.fp_type, **self._finger_params)
+        bits = (bits > 0).astype(np.uint8)
+        chunks = (
+            np.packbits(bits, bitorder="big")
+            .view(np.dtype(">u8"))
+            .astype(np.dtype("<u8"))
+        )
+        return chunks, int(bits.sum())
+
+    @staticmethod
+    def bitbounds(query_popcnt: int, threshold: float) -> tuple[int, int]:
         lower = int(np.floor(threshold * query_popcnt))
         upper = int(np.ceil(query_popcnt / threshold))
         return lower, upper
-    
-    def _row_ranges(self) -> list[tuple[int, int]]:
-        """Split the table into n_workers contiguous row ranges (not by candidate count)."""
-        with tb.open_file(self.h5_path, mode="r") as f:
-            n_rows = f.root.fps.shape[0]
 
-        bounds = np.linspace(0, n_rows, self.n_workers + 1, dtype=np.int64)
-        return list(zip(bounds[:-1].tolist(), bounds[1:].tolist()))
-    
-    def tanimoto_search(
-        self,
-        smiles: str,
-        threshold: float = 0.7,
-    ) -> list[tuple[int, float]]:
+    def tanimoto_search(self, smiles: str, threshold: float = 0.7) -> list[tuple[int, float]]:
         """
-        Memory-bounded parallel Tanimoto search.
-        Each worker streams its own row range — never materializes the full
-        filtered set, regardless of how many billions of rows match.
+        Search one query against the currently open database.
+        Pool stays alive — call this repeatedly for multiple queries, no respawning.
         """
-        fp_fields, finger_params = self.get_info_from_db(self.h5_path)
-        query_chunks, query_popcnt = self.smiles_to_query_chunks(smiles, **finger_params)
+        
+        query_chunks, query_popcnt = self.smiles_to_query_chunks(smiles)
         lower, upper = self.bitbounds(query_popcnt, threshold)
 
-        ranges = self._row_ranges()
-        print(f"Query popcnt: {query_popcnt}, popcnt range: [{lower}, {upper}]")
-        print(f"Workers: {self.n_workers}, row ranges: {len(ranges)}")
+        args = [
+            (start, end, lower, upper, query_chunks, threshold, self._fp_fields, self.chunk_size)
+            for start, end in self._row_range_cache
+        ]
 
-        args = [(start, end, lower, upper, query_chunks, threshold, fp_fields, self.chunk_size)
-            for start, end in ranges]
+        chunk_results = self._pool.map(_process_row_range, args, chunksize=1)
 
-        with Pool(processes=self.n_workers, initializer=_init_worker, initargs=(self.h5_path,)) as pool:
-            chunk_results = pool.map(_process_row_range, args, chunksize=1)
-
-        results = sorted(
+        return sorted(
             [hit for chunk in chunk_results for hit in chunk],
             key=lambda x: -x[1],
         )
-        print(f"Hits above {threshold}: {len(results)}")
-        return results
 
 
 @dataclass
@@ -215,23 +222,25 @@ class FPSim2Query:
     
     @property
     def queries(self) -> list[str]:
-        if isinstance(self.query, str):
-            return [self.query]
-        return self.query
-    
+        return [self.query] if isinstance(self.query, str) else self.query
+
     def similarity_search(
         self,
         threshold: float = 0.7,
-        chunk_size=150_000,
+        chunk_size: int = 150_000,
         fp_type: str = "ecfp",
-            ):
-        """Perform similarity search using FPSIM2"""
-        search = {}
-        fpe = ManualTanimoto(self.db_name, self.workers, chunk_size, fp_type)
-        for que in self.queries:
-            search[que] = fpe.tanimoto_search(que, threshold=threshold)
-            
-        return search
+    ) -> dict[str, list[tuple[int, float]]]:
+        """
+        Search all queries against all databases.
+        Pool is opened once per database and reused across all queries.
+        """
+        results = {}
+        # one ManualTanimoto per database — pool lives for the full set of queries
+        with ManualTanimoto(self.db_name, self.workers, chunk_size, fp_type) as engine:
+            for smiles in self.queries:
+                results[smiles] = engine.tanimoto_search(smiles, threshold=threshold)
+
+        return results
     
     def substructure_screenout(
         self):
