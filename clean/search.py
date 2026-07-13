@@ -19,7 +19,6 @@ import atexit
 from multiprocessing import Pool
 import time
 
-
 def parse_args():
     parser = argparse.ArgumentParser(description='Search similar SMILES')
     parser.add_argument("-db", "--db_name", type=str, help="the name of the FPSIM2 fingerprint database", required=False, default="Molecular_database/search_db")
@@ -36,13 +35,10 @@ def parse_args():
     parser.add_argument("-ca", "--commercially_avaliable", action="store_true", help="Whether to only retrieve isomers from commercially avaliable databases", required=False)
     parser.add_argument("-cd", "--commercial_databases", nargs="+", type=str, help="The commercial databases to retrieve isomers from if --commercially_avaliable is set", default=["enamine", "wuxi", "mcule", "molport", "zinc"], required=False)
     parser.add_argument('-p','--pairwise_database', type=str, help='The folder path for the pairwise database', required=False, default='Molecular_database/pairwise_analysis')
-    parser.add_argument('-cdb', '--cdb_id', type=json.loads, 
-                        help='Dictionary mapping commercial database names to their IDs', required=False, 
-                        default={"enamine": "001", "wuxi": "014", "mcule": "006", "molport": "013", "zinc": "002"})
     parser.add_argument("-s", "--stage", choices=("search", "retrieve"), default="search", help="Runing search or retrieve")
     parser.add_argument('-ch','--chunk_size', type=int, help='The chunck size for the tanimoto search', required=False, default=150_000)
     args = parser.parse_args()
-    return args.db_name, args.nostereo_database, args.index_file, args.top_k, args.threshold, args.num_workers, args.query_path, args.hac_limits, args.mw_range, args.search_type, args.deduplicated_database, args.commercially_avaliable, args.commercial_databases, args.pairwise_database, args.cdb_id, args.stage, args.chunk_size
+    return args.db_name, args.nostereo_database, args.index_file, args.top_k, args.threshold, args.num_workers, args.query_path, args.hac_limits, args.mw_range, args.search_type, args.deduplicated_database, args.commercially_avaliable, args.commercial_databases, args.pairwise_database,  args.stage, args.chunk_size
 
 
 # ── Worker-global state ─────────────────────────────────────────────────────────
@@ -241,9 +237,19 @@ class FPSim2Query:
         # one ManualTanimoto per database — pool lives for the full set of queries
         with ManualTanimoto(self.db_name, self.workers, chunk_size, fp_type) as engine:
             for smiles in self.queries:
+                t0 = time.perf_counter()
                 results[smiles] = engine.tanimoto_search(smiles, threshold=threshold)
-
+                elapsed = time.perf_counter() - t0
+                self.log_time(smiles, "similarity", elapsed)
         return results
+    
+    def log_time(self, query, search_type: str, elapsed: float):
+        """Log the search time to a CSV file."""
+        log_file = Path("search_times.csv")
+        with open(log_file, "a") as f:
+            if not f.tell():
+                f.write("query,db_name,search_type,elapsed,num_workers\n")
+            f.write(f"{query},{Path(self.db_name).stem},{search_type},{elapsed:.3f},{self.workers}\n")
     
     def substructure_screenout(
         self):
@@ -422,18 +428,21 @@ class IsomerRetriever:
     commercially_available: bool = False
     commercial_databases: Sequence[str] = ("enamine", "wuxi", "mcule", "molport", "zinc")
 
-    db_id: dict[str, str] = field(default_factory=lambda: {
+    _db_id: dict[str, str] = field(default_factory=lambda: {
         "enamine": "001",
         "wuxi": "014",
         "mcule": "006",
         "molport": "013",
         "zinc": "002",
-    })
+    }, init=False, repr=False)
 
     @property
     def commercial_db_codes(self) -> tuple[str, ...]:
-        return tuple(self.db_id[name] for name in self.commercial_databases)
+        return tuple(self._db_id[name] for name in self.commercial_databases)
     
+    @property
+    def db_code_to_name(self) -> dict[str, str]:
+        return {v: k for k, v in self._db_id.items()}
     
     def run(
         self,
@@ -514,6 +523,21 @@ class IsomerRetriever:
                                       "smiles": smiles, 
                                       "db_codes": self.commercial_db_codes}).df()
 
+    def add_vendor_info(
+        self,
+        isomers: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """
+        Add the vendor information to the isomers.
+        """
+        db_list = isomers["db_id"].str.split(",").to_list()
+        new_x = []
+        for x in db_list:
+            a = [self.db_code_to_name[db] for db in x if db in self.db_code_to_name]
+            new_x.append(",".join(a))
+        isomers["vendor"] = new_x
+        return isomers
+    
     def _filter_commercial_isomers(
         self,
         db_con: duckdb.DuckDBPyConnection,
@@ -526,6 +550,7 @@ class IsomerRetriever:
         """
 
         commercial = isomers[isomers["db_id"].isin(self.commercial_db_codes)]
+        
         non_commercial = isomers[~isomers["db_id"].isin(self.commercial_db_codes)]
 
         if non_commercial.empty:
@@ -536,7 +561,7 @@ class IsomerRetriever:
             non_commercial,
         )
 
-        return pd.concat([commercial, duplicated_commercial], axis=0)
+        return self.add_vendor_info(pd.concat([commercial, duplicated_commercial], axis=0))
 
     def _find_duplicates_in_commercial_dbs(
         self,
@@ -634,7 +659,7 @@ def process_query_by_db(db_name: str, query: str | list[str],
     
     task_id = int(os.environ.get('SLURM_ARRAY_TASK_ID', 0))
     array_size = int(os.environ.get('SLURM_ARRAY_TASK_COUNT', 0))
-    log_file = outpath / f"query_{task_id}.csv"
+
     my_chunk = list(Path(db_name).glob("*.h5"))
     if array_size:
         my_chunk = my_chunk[task_id::array_size]
@@ -646,22 +671,14 @@ def process_query_by_db(db_name: str, query: str | list[str],
         if Path(out_pkl).exists():
             print(f"Search results for {db} already exists, skipping...")
             continue
-        t0 = time.perf_counter()
+        
         fp = FPSim2Query(query=query, db_name=db, workers=num_workers)
         search = {"similarity": partial(fp.similarity_search, threshold=threshold, chunk_size=chunk_size), 
                   "substructure": fp.substructure_screenout}    
-        elapsed = time.perf_counter() - t0
+        
         search_results = search[search_type]()
         with open(out_pkl, "wb") as js:
             pk.dump(search_results, js)
-        
-        # write the search time to a log file    
-        with open(log_file, "a") as f:
-            if not f.tell():
-                f.write("db_name,search_type,elapsed,num_workers\n")
-            f.write(
-                f"{db.name},{search_type},{elapsed:.3f},{num_workers}\n"
-            )
             
         del fp; gc.collect()
 
@@ -692,7 +709,7 @@ def read_search_results(top_k: None | int = None,
 
 
 def main():
-    db_name, molecular_database, index_file, top_k, threshold, num_workers, query_path, hac_limits, mw_range, search_type, deduplicated_database, commercially_avaliable, commercial_databases, pairwise_database, cdb_id, stage,chunk_size = parse_args()
+    db_name, molecular_database, index_file, top_k, threshold, num_workers, query_path, hac_limits, mw_range, search_type, deduplicated_database, commercially_avaliable, commercial_databases, pairwise_database,  stage,chunk_size = parse_args()
    
     query_path = Path(query_path)
     with open(query_path) as w:
@@ -714,7 +731,7 @@ def main():
                 smiles = match_substructure(query, smiles, num_workers)
             retrieve_isomers = IsomerRetriever(deduplicated_database, pairwise_database, 
                                                commercially_avaliable, 
-                                               commercial_databases, cdb_id)
+                                               commercial_databases)
             
             output_file = f"{query_path.parent}/{query_path.stem}_query_results.csv" 
             smiles = pd.concat(retrieve_isomers.run(smiles))
