@@ -19,6 +19,7 @@ import atexit
 from multiprocessing import Pool
 import time
 
+
 def parse_args():
     parser = argparse.ArgumentParser(description='Search similar SMILES')
     parser.add_argument("-db", "--db_name", type=str, help="the name of the FPSIM2 fingerprint database", required=False, default="Molecular_database/search_db")
@@ -118,6 +119,16 @@ def _process_row_range(
         results.extend(_score_batch(batch, query_chunks, threshold, fp_fields))
 
     return results
+
+
+def log_time(kwargs):
+    """Log the search time to a CSV file."""
+    log_file = Path(f"search_times/{Path(kwargs['db_name'])}.csv")
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    with open(log_file, "a") as f:
+        if not f.tell():
+            f.write(",".join(kwargs.keys()) + "\n")
+        f.write(f"{','.join(map(str, kwargs.values()))}\n")
 
 
 @dataclass
@@ -240,16 +251,14 @@ class FPSim2Query:
                 t0 = time.perf_counter()
                 results[smiles] = engine.tanimoto_search(smiles, threshold=threshold)
                 elapsed = time.perf_counter() - t0
-                self.log_time(smiles, "similarity", elapsed)
+                log_time({
+                    "query": smiles,
+                    "db_name": Path(self.db_name).stem,
+                    "search_type": "similarity",
+                    "elapsed": elapsed,
+                    "num_workers": self.workers
+                })
         return results
-    
-    def log_time(self, query, search_type: str, elapsed: float):
-        """Log the search time to a CSV file."""
-        log_file = Path("search_times.csv")
-        with open(log_file, "a") as f:
-            if not f.tell():
-                f.write("query,db_name,search_type,elapsed,num_workers\n")
-            f.write(f"{query},{Path(self.db_name).stem},{search_type},{elapsed:.3f},{self.workers}\n")
     
     def substructure_screenout(
         self):
@@ -725,14 +734,18 @@ def main():
         case "retrieve": 
             search_results = read_search_results(top_k, search_type, outpath=outpath)
             retrieve = SmilesRetriever(index_file, molecular_database, mw_range, hac_limits)
+            t0 = time.perf_counter()
             smiles = retrieve.run(search_results, search_type)
+            t1 = time.perf_counter()
+            log_time({"query": query_path.stem, "db_name": Path(molecular_database).stem, "elapsed": t1 - t0, "num_workers": num_workers})
             pd.concat(smiles).to_csv(f"{query_path.parent}/{query_path.stem}_nostereo_smiles.csv")
             if search_type == "substructure":
                 smiles = match_substructure(query, smiles, num_workers)
             retrieve_isomers = IsomerRetriever(deduplicated_database, pairwise_database, 
                                                commercially_avaliable, 
                                                commercial_databases)
-            
+            t2 = time.perf_counter()
+            log_time({"query": query_path.stem, "db_name": Path(deduplicated_database).stem, "elapsed": t2 - t1, "num_workers": num_workers})
             output_file = f"{query_path.parent}/{query_path.stem}_query_results.csv" 
             smiles = pd.concat(retrieve_isomers.run(smiles))
             query_not_indb = list(set(query) - set(smiles.index.unique(0)))
