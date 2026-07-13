@@ -17,6 +17,7 @@ import pickle as pk
 import tables as tb
 import atexit
 from multiprocessing import Pool
+import time
 
 
 def parse_args():
@@ -139,6 +140,12 @@ class ManualTanimoto:
     def __post_init__(self):
         self._fp_fields, self._finger_params = self.get_info_from_db()
         self._start_pool()
+        # cache row ranges — table size doesn't change between queries
+        with tb.open_file(self.h5_path, mode="r") as f:
+            n_rows = f.root.fps.shape[0]
+        bounds = np.linspace(0, n_rows, self.n_workers + 1, dtype=np.int64)
+        self._row_range_cache = list(zip(bounds[:-1].tolist(), bounds[1:].tolist()))
+        
 
     def _start_pool(self) -> None:
         """Spawn workers, each opening the file once."""
@@ -147,11 +154,7 @@ class ManualTanimoto:
             initializer=_init_worker,
             initargs=(self.h5_path,),
         )
-        # cache row ranges — table size doesn't change between queries
-        with tb.open_file(self.h5_path, mode="r") as f:
-            n_rows = f.root.fps.shape[0]
-        bounds = np.linspace(0, n_rows, self.n_workers + 1, dtype=np.int64)
-        self._row_range_cache = list(zip(bounds[:-1].tolist(), bounds[1:].tolist()))
+
 
     def _stop_pool(self) -> None:
         """Cleanly shut down workers (triggers atexit cleanup in each)."""
@@ -206,7 +209,7 @@ class ManualTanimoto:
             for start, end in self._row_range_cache
         ]
 
-        chunk_results = self._pool.map(_process_row_range, args, chunksize=1)
+        chunk_results = self._pool.map(_process_row_range, args)
 
         return sorted(
             [hit for chunk in chunk_results for hit in chunk],
@@ -623,7 +626,7 @@ def match_substructure(queries: str | list[str],
 
 
 def process_query_by_db(db_name: str, query: str | list[str], 
-                        num_workers: int=30, 
+                        num_workers: int= 30, 
                         threshold: float = 0.7, 
                         search_type: str = "similarity",
                         outpath: Path = Path("search_results"),
@@ -631,7 +634,7 @@ def process_query_by_db(db_name: str, query: str | list[str],
     
     task_id = int(os.environ.get('SLURM_ARRAY_TASK_ID', 0))
     array_size = int(os.environ.get('SLURM_ARRAY_TASK_COUNT', 0))
-    
+    log_file = outpath / f"query_{task_id}.csv"
     my_chunk = list(Path(db_name).glob("*.h5"))
     if array_size:
         my_chunk = my_chunk[task_id::array_size]
@@ -643,15 +646,23 @@ def process_query_by_db(db_name: str, query: str | list[str],
         if Path(out_pkl).exists():
             print(f"Search results for {db} already exists, skipping...")
             continue
-        
+        t0 = time.perf_counter()
         fp = FPSim2Query(query=query, db_name=db, workers=num_workers)
         search = {"similarity": partial(fp.similarity_search, threshold=threshold, chunk_size=chunk_size), 
                   "substructure": fp.substructure_screenout}    
-        
+        elapsed = time.perf_counter() - t0
         search_results = search[search_type]()
         with open(out_pkl, "wb") as js:
             pk.dump(search_results, js)
         
+        # write the search time to a log file    
+        with open(log_file, "a") as f:
+            if not f.tell():
+                f.write("db_name,search_type,elapsed,num_workers\n")
+            f.write(
+                f"{db.name},{search_type},{elapsed:.3f},{num_workers}\n"
+            )
+            
         del fp; gc.collect()
 
 
