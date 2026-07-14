@@ -10,7 +10,6 @@ from utils import convert_hac_to_mw, convert_mw_to_hac
 from functools import partial
 from collections import defaultdict
 import datamol as dm
-import json
 import os
 import gc
 import pickle as pk
@@ -310,36 +309,35 @@ class SmilesRetriever:
         elif self.mw_range is not None:
             return convert_mw_to_hac(self.mw_range[0])
         else:
-            return None
-    
+            return None    
 
-    def _filter_hacs(self, hac: int):
+    def _filter_hacs(self, hac: tuple[int,int]):
         u, l = True, True
         if self.upper is not None:
-            u =  hac <= self.upper
+            u =  hac[0] <= self.upper
         if self.lower is not None:
-            l = hac >= self.lower                            
+            l = hac[0] >= self.lower                            
         return all([u, l])
         
-
     def find_hac_by_index(self, search_results: dict[str, list[int]]) -> dict[str, list[int]]:
         """
         Given the indices of the search results find in which HAC the molecule is found and reduce the scopre when
         retrieving the SMILES strings
         """
-        with open(self.index_file, "r") as st:
-            lines = {int(x.strip().split("#")[-1]): int(x.split("#")[0].strip("HAC")) for x in st.readlines()}
-        index_dict = {}
+        with open(self.index_file, "r") as st:  
+            lines = {int(x.split("#")[-1]): (int(x.split("#")[0].strip("HAC")), int(x.split("#")[1])) for x in st.readlines()}
+
+        hac_dict = {}
         bounds = np.array(sorted(lines.keys()))
         for query, result in search_results.items():
             index = sorted([x[0] for x in result])
             i = np.unique(np.searchsorted(bounds, index, side="right"))
             hacs = [lines.get(x) for x in bounds[i]]
-            index_dict[query] = hacs
-        return index_dict
+            hac_dict[query] = hacs
+        return hac_dict
 
     def convert_hac_topath(self,
-        hac_dict: dict[str, list[int]], 
+        hac_dict: dict[str, list[tuple[int, int]]], 
         ) -> dict[str, list[str]]:
         """
         Convert hac to parquet paths for the duck db read_parquet
@@ -347,7 +345,7 @@ class SmilesRetriever:
         parquet_paths = {}
         for query, hacs in hac_dict.items():
             hacs = filter(self._filter_hacs, hacs)
-            parquet_paths[query] = [f"{self.database_path}/HAC_{hac}/*.parquet" for hac in hacs]
+            parquet_paths[query] = [f"{self.database_path}/HAC_{hac[0]}/HAC{hac[0]}_{hac[1]:02d}.parquet" for hac in hacs]
         return parquet_paths
 
     def retrieve_smiles(self,
@@ -407,15 +405,15 @@ class SmilesRetriever:
         return result, len(index)
     
     def run(self, 
-        search_results: dict[str, list[int]],
+        search_result: dict[str, list[int]],
         search_type: str ="similarity"
         ) -> pd.DataFrame:
         """
         A convenient function to run the similarity search
         """
-        hac_dict = self.find_hac_by_index(search_results)
+        hac_dict = self.find_hac_by_index(search_result)
         parquet_paths = self.convert_hac_topath(hac_dict)
-        smiles, index_length = self.batch_retrieve(search_results, parquet_paths, search_type)
+        smiles, index_length = self.batch_retrieve(search_result, parquet_paths, search_type)
         return smiles, index_length
 
 
@@ -712,6 +710,24 @@ def read_search_results(top_k: None | int = None,
     return {query: sorted(item) for query, item in search_results.items()}
 
 
+def get_max(database_path, outpath, column="num_ID"):
+    
+    files = sorted(Path(database_path).glob("HAC_*/*.parquet"), 
+                   key=lambda x: (int(x.parent.stem.split("_")[-1]), int(x.stem.split("_")[-1])))
+
+    res = []
+    if Path(outpath).exists():
+        return 
+    
+    for f in files:
+        hac = int(f.parent.stem.split("_")[-1])
+        file_num = int(f.stem.split("_")[-1])
+        max_val = duckdb.sql(f"SELECT MAX({column}) FROM read_parquet('{f}')").fetchone()[0]
+        res.append(f"HAC {hac}#{file_num}: {max_val}\n")
+    with open(Path(outpath), "w") as f:
+        f.writelines(res)
+
+
 def main():
     db_name, molecular_database, index_file, top_k, threshold, num_workers, query_path, hac_limits, mw_range, search_type, deduplicated_database, commercially_avaliable, commercial_databases, pairwise_database,  stage,chunk_size = parse_args()
    
@@ -726,7 +742,8 @@ def main():
         case "search":
             process_query_by_db(db_name, query, num_workers, threshold, search_type, outpath=outpath, chunk_size=chunk_size)
             
-        case "retrieve": 
+        case "retrieve":
+            get_max(molecular_database, index_file, column="num_ID")
             search_results = read_search_results(top_k, search_type, outpath=outpath)
             retrieve = SmilesRetriever(index_file, molecular_database, mw_range, hac_limits)
             t0 = time.perf_counter()

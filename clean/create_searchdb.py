@@ -13,14 +13,10 @@ import argparse
 import pyarrow.parquet as pq
 from FPSim2.scripts.create_fpsim2_fp_db import count_rows, calculate_chunks, read_chunk, create_db_file
 from FPSim2.io.chem import get_fp_length
-from FPSim2.io.backends.pytables import create_schema, sort_db_file, calc_popcnt_bins_pytables
 import tables as tb
 import json
-import pyarrow.compute as pc
-import pyarrow as pa
 import rdkit
 from importlib.metadata import version
-import fcntl
 __version__ = version("FPSim2")
 
 
