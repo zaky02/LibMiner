@@ -90,7 +90,7 @@ def _process_row_range(
     args: tuple[int, int, int, int, np.ndarray, float, list[str], int]
 ) -> list[tuple[int, float]]:
     """
-    Worker task — streams its OWN row range with where(), scoring in
+    Worker task streams its OWN row range with where(), scoring in
     bounded-size sub-batches. Never materializes the full range at once.
     """
     start_row, end_row, lower, upper, query_chunks, threshold, fp_fields, sub_chunk_size = args
