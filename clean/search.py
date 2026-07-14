@@ -251,13 +251,8 @@ class FPSim2Query:
                 t0 = time.perf_counter()
                 results[smiles] = engine.tanimoto_search(smiles, threshold=threshold)
                 elapsed = time.perf_counter() - t0
-                log_time({
-                    "query": smiles,
-                    "db_name": Path(self.db_name).stem,
-                    "search_type": "similarity",
-                    "elapsed": elapsed,
-                    "num_workers": self.workers
-                })
+                log_time({"query": smiles, "db_name": Path(self.db_name).stem.split("_")[1],
+                    "search_type": "similarity", "elapsed": elapsed, "num_workers": self.workers})
         return results
     
     def substructure_screenout(
@@ -409,7 +404,7 @@ class SmilesRetriever:
             result[query] = dat
             
         db_con.close()
-        return result
+        return result, len(index)
     
     def run(self, 
         search_results: dict[str, list[int]],
@@ -420,8 +415,8 @@ class SmilesRetriever:
         """
         hac_dict = self.find_hac_by_index(search_results)
         parquet_paths = self.convert_hac_topath(hac_dict)
-        smiles = self.batch_retrieve(search_results, parquet_paths, search_type)
-        return smiles
+        smiles, index_length = self.batch_retrieve(search_results, parquet_paths, search_type)
+        return smiles, index_length
 
 
 @dataclass
@@ -735,24 +730,25 @@ def main():
             search_results = read_search_results(top_k, search_type, outpath=outpath)
             retrieve = SmilesRetriever(index_file, molecular_database, mw_range, hac_limits)
             t0 = time.perf_counter()
-            smiles = retrieve.run(search_results, search_type)
+            smiles, index_length = retrieve.run(search_results, search_type)
             t1 = time.perf_counter()
-            log_time({"query": query_path.stem, "db_name": Path(molecular_database).stem, "elapsed": t1 - t0, "num_workers": num_workers})
+            log_time({"query": query_path.stem, "db_name": Path(molecular_database).stem, "elapsed": t1 - t0, "num_workers": num_workers, "length_index": index_length})
             pd.concat(smiles).to_csv(f"{query_path.parent}/{query_path.stem}_nostereo_smiles.csv")
             if search_type == "substructure":
                 smiles = match_substructure(query, smiles, num_workers)
             retrieve_isomers = IsomerRetriever(deduplicated_database, pairwise_database, 
                                                commercially_avaliable, 
                                                commercial_databases)
-            t2 = time.perf_counter()
-            log_time({"query": query_path.stem, "db_name": Path(deduplicated_database).stem, "elapsed": t2 - t1, "num_workers": num_workers})
-            output_file = f"{query_path.parent}/{query_path.stem}_query_results.csv" 
+
             smiles = pd.concat(retrieve_isomers.run(smiles))
+            t2 = time.perf_counter()
+            log_time({"query": query_path.stem, "db_name": Path(deduplicated_database).stem, "elapsed": t2 - t1, "num_workers": num_workers, "length_index": index_length})
             query_not_indb = list(set(query) - set(smiles.index.unique(0)))
             print(f"{len(query_not_indb)} queries not found in the database, they will be saved in the output with ID, SMILES, db_id and Tanimoto set to 0")
             subset_not_indb = pd.DataFrame({"query": query_not_indb, "ID": 0, "SMILES": 0, "db_id": 0, 
                                    "Tanimoto": 0}).set_index(["query", "SMILES"])
             
+            output_file = f"{query_path.parent}/{query_path.stem}_query_results.csv" 
             pd.concat([smiles, subset_not_indb]).to_csv(output_file)
             
         case other:
