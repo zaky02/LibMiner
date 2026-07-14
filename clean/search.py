@@ -204,7 +204,7 @@ class ManualTanimoto:
     def tanimoto_search(self, smiles: str, threshold: float = 0.7) -> list[tuple[int, float]]:
         """
         Search one query against the currently open database.
-        Pool stays alive — call this repeatedly for multiple queries, no respawning.
+        Pool stays alive call this repeatedly for multiple queries, no respawning.
         """
         
         query_chunks, query_popcnt = self.smiles_to_query_chunks(smiles)
