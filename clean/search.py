@@ -105,7 +105,7 @@ def _process_row_range(
         f"(popcnt >= {lower}) & (popcnt <= {upper})",
         start=start_row, stop=end_row,
     ):
-        # MUST extract values now — Row object is invalidated on next iteration
+        # MUST extract values now Row object is invalidated on next iteration
         buffer.append(tuple(row[name] for name in colnames))
 
         if len(buffer) >= sub_chunk_size:
@@ -137,7 +137,7 @@ class ManualTanimoto:
     chunk_size: int = 150_000
     fp_type: str = "ecfp"
 
-    # Pool is managed internally — not exposed to the user
+    # Pool is managed internally not exposed to the user
     _pool: Pool = field(default=None, init=False, repr=False)
     _row_range_cache: list[tuple[int, int]] = field(default=None, init=False, repr=False)
     _fp_fields: list[str] = field(default=None, init=False, repr=False)
@@ -146,7 +146,7 @@ class ManualTanimoto:
     def __post_init__(self):
         self._fp_fields, self._finger_params = self.get_info_from_db()
         self._start_pool()
-        # cache row ranges — table size doesn't change between queries
+        # cache row ranges table size doesn't change between queries
         with tb.open_file(self.h5_path, mode="r") as f:
             n_rows = f.root.fps.shape[0]
         bounds = np.linspace(0, n_rows, self.n_workers + 1, dtype=np.int64)
@@ -244,7 +244,7 @@ class FPSim2Query:
         Pool is opened once per database and reused across all queries.
         """
         results = {}
-        # one ManualTanimoto per database — pool lives for the full set of queries
+        # one ManualTanimoto per database pool lives for the full set of queries
         with ManualTanimoto(self.db_name, self.workers, chunk_size, fp_type) as engine:
             for smiles in self.queries:
                 t0 = time.perf_counter()
