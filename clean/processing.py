@@ -6,7 +6,7 @@ import pandas as pd
 import dask.dataframe as dd
 from rdkit import Chem
 from rdkit import rdBase
-from dask.distributed import Client, performance_report
+from dask.distributed import Client, performance_report, LocalCluster
 import pyarrow.parquet as pq
 import datamol as dm
 import json
@@ -28,13 +28,22 @@ def parse_args():
     args = parser.parse_args()
     return args.database, args.blocksize, args.output_path, args.group_size, args.use_cols, args.progress_file
 
-# -------------------------
-#  ️ Setup Dask cluster in Slurm
-# -------------------------    
-scheduler_address = os.environ["DASK_SCHEDULER_ADDRESS"]
 
-client = Client(scheduler_address)    # Connect to that cluster
-client.wait_for_workers(n_workers=1, timeout=180)
+def get_dask_client():
+    scheduler_address = os.environ.get("DASK_SCHEDULER_ADDRESS")
+    
+    if scheduler_address:
+        # Something upstream (Slurm job script, ECS task def, k8s manifest, 
+        # whatever) already launched a scheduler and told us where it is.
+        client = Client(scheduler_address)
+        client.wait_for_workers(n_workers=1, timeout=180)
+    else:
+        # No scheduler was pre-launched — spin one up locally.
+        client = Client(LocalCluster())
+    
+    return client
+
+client = get_dask_client()
 
 # -------------------------
 # 1️⃣ Setup RDKit tools
@@ -143,6 +152,42 @@ def is_true_peptide(mol: Chem.Mol) -> bool:
     return False
 
 
+def protonate_acidic_oxygens(mol, return_mol=True):
+    mol = Chem.MolFromSmiles(mol) if isinstance(mol, str) else mol
+    if mol is None:
+        return None
+    
+    rwmol = Chem.RWMol(mol)
+    
+    patterns = [
+        '[O-]-[PX4](=O)',
+        '[O-]-[SX4](=O)(=O)',
+        '[O-]-[CX3]=O',
+    ]
+    
+    target_o_idxs = set()
+    for smarts in patterns:
+        patt = Chem.MolFromSmarts(smarts)
+        for match in rwmol.GetSubstructMatches(patt):
+            target_o_idxs.add(match[0])
+    
+    if not target_o_idxs:
+        return mol
+    
+    for o_idx in target_o_idxs:
+        o_atom = rwmol.GetAtomWithIdx(o_idx)
+        o_atom.SetFormalCharge(0)
+        o_atom.SetNoImplicit(False)
+        o_atom.SetNumExplicitHs(1)
+    
+    mol = rwmol.GetMol()
+    
+    if return_mol:
+        return mol
+    
+    return Chem.MolToSmiles(Chem.SanitizeMol(mol))
+
+
 def normalize_smiles(smi: str, 
                      check_isotopes: bool = False) -> str | None:
     """Normalize SMILES by:
@@ -174,17 +219,19 @@ def normalize_smiles(smi: str,
             # demoemento Molport y surechemble seguro que tienen isotopos
             if check_isotopes and any(atom.GetIsotope() != 0 for atom in mol.GetAtoms()):
                 return None
-
-            mol = dm.fix_mol(mol, largest_only=True if "." in smi else False)
             
             mol = dm.standardize_mol(
             mol,
-            disconnect_metals=False,
+            disconnect_metals=True,
             normalize=True,
             reionize=True if "+" in smi or "-" in smi else False,
-            uncharge=False,
+            uncharge=True if "+" in smi or "-" in smi else False,
             stereo=False,
             )
+            
+            mol = dm.fix_mol(mol, largest_only=True if "." in smi else False)
+            
+            mol = dm.isomers.canonical_tautomer(mol)
             
             if is_true_peptide(mol): # skip true peptides
                 return None
@@ -194,6 +241,8 @@ def normalize_smiles(smi: str,
             if mol.HasSubstructMatch(unsatu):
                 return None
 
+            mol = protonate_acidic_oxygens(mol)
+            mol = Chem.SanitizeMol(mol)
             sma = Chem.MolToSmiles(mol, canonical=True, isomericSmiles=True)
             
             tokens = tokenizer.findall(sma)

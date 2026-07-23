@@ -17,7 +17,7 @@ import time
 import argparse
 import numpy as np
 import dask.dataframe as dd
-from dask.distributed import Client, performance_report
+from dask.distributed import Client, performance_report, LocalCluster
 import pandas as pd
 import gc
 import json
@@ -52,10 +52,21 @@ def parse_args():
 #  ️ Setup Dask cluster in Slurm
 # -------------------------
 
-scheduler_address = os.environ["DASK_SCHEDULER_ADDRESS"]
+def get_dask_client():
+    scheduler_address = os.environ.get("DASK_SCHEDULER_ADDRESS")
+    
+    if scheduler_address:
+        # Something upstream (Slurm job script, ECS task def, k8s manifest, 
+        # whatever) already launched a scheduler and told us where it is.
+        client = Client(scheduler_address)
+        client.wait_for_workers(n_workers=1, timeout=180)
+    else:
+        # No scheduler was pre-launched — spin one up locally.
+        client = Client(LocalCluster())
+    
+    return client
 
-client = Client(scheduler_address)    # Connect to that cluster
-client.wait_for_workers(n_workers=1, timeout=180)
+client = get_dask_client()
 
 # -------------------------
 # 1️⃣ Setup RDKit tools

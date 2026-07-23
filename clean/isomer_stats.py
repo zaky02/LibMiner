@@ -1,5 +1,5 @@
 import dask.dataframe as dd
-from dask.distributed import Client, performance_report
+from dask.distributed import Client, performance_report, LocalCluster
 import os
 from pathlib import Path
 import argparse
@@ -24,9 +24,24 @@ def parse_args():
     args = parser.parse_args()
     return args.blocksize, args.database_path, args.nostereo, args.output_path
 
-scheduler_address = os.environ["DASK_SCHEDULER_ADDRESS"]
-client = Client(scheduler_address)    # Connect to that cluster
-client.wait_for_workers(n_workers=1, timeout=180)
+
+def get_dask_client():
+    scheduler_address = os.environ.get("DASK_SCHEDULER_ADDRESS")
+    
+    if scheduler_address:
+        # Something upstream (Slurm job script, ECS task def, k8s manifest, 
+        # whatever) already launched a scheduler and told us where it is.
+        client = Client(scheduler_address)
+        client.wait_for_workers(n_workers=1, timeout=180)
+    else:
+        # No scheduler was pre-launched — spin one up locally.
+        client = Client(LocalCluster())
+    
+    return client
+
+client = get_dask_client()
+
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
