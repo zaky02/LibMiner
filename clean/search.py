@@ -6,7 +6,6 @@ import pandas as pd
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Sequence
-from utils import convert_hac_to_mw, convert_mw_to_hac
 from functools import partial
 from collections import defaultdict
 import datamol as dm
@@ -17,6 +16,8 @@ import tables as tb
 import atexit
 from multiprocessing import Pool
 import time
+from .utils import convert_hac_to_mw, convert_mw_to_hac, inchi_key
+from .processing import protonate_acidic_oxygens
 
 
 def parse_args():
@@ -723,9 +724,13 @@ def get_max(database_path, outpath, column="num_ID"):
         hac = int(f.parent.stem.split("_")[-1])
         file_num = int(f.stem.split("_")[-1])
         max_val = duckdb.sql(f"SELECT MAX({column}) FROM read_parquet('{f}')").fetchone()[0]
-        res.append(f"HAC {hac}#{file_num}: {max_val}\n")
+        res.append(f"HAC {hac}#{file_num}# {max_val}\n")
     with open(Path(outpath), "w") as f:
         f.writelines(res)
+
+def post_filter(retrieved_smiles):
+    retrieved_smiles["inch_key"] = [inchi_key(protonate_acidic_oxygens(x, return_mol=False)) for x in retrieved_smiles.index.unique(1)]
+    return retrieved_smiles.drop_duplicates("inch_key").drop("inch_key", axis=1)
 
 
 def main():
@@ -761,6 +766,7 @@ def main():
             t2 = time.perf_counter()
             log_time({"query": query_path.stem, "db_name": Path(deduplicated_database).stem, "elapsed": t2 - t1, "num_workers": num_workers, "length_index": index_length})
             query_not_indb = list(set(query) - set(smiles.index.unique(0)))
+            smiles = post_filter(smiles)
             print(f"{len(query_not_indb)} queries not found in the database, they will be saved in the output with ID, SMILES, db_id and Tanimoto set to 0")
             subset_not_indb = pd.DataFrame({"query": query_not_indb, "ID": 0, "SMILES": 0, "db_id": 0, 
                                    "Tanimoto": 0}).set_index(["query", "SMILES"])

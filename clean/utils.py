@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Sequence
 from collections import defaultdict
 import tables as tb
+from rdkit import Chem
 
 
 def convert_folder(hac_folders: Path | str, keep: list[str] = []) -> dict[str, list[Path]]:
@@ -213,3 +214,9 @@ def encode_fps_batch(
         out[f] = chunks[:, i]
 
     return out
+
+
+def inchi_key(smiles):
+    mol = Chem.MolFromSmiles(smiles)
+    inchi = Chem.MolToInchi(mol)
+    return Chem.InchiToInchiKey(inchi)
