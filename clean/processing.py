@@ -43,8 +43,6 @@ def get_dask_client():
     
     return client
 
-client = get_dask_client()
-
 # -------------------------
 # 1️⃣ Setup RDKit tools
 # -------------------------
@@ -62,7 +60,7 @@ halogen = re.compile(r'Br|Cl|F|I')
 glycol = Chem.MolFromSmarts('CCOCCOCCO')
 
 rare = {
-    'He', 'Li', 'Be', 'Ne',
+    'He', 'Li', 'Be', 'Ne', "Si",
     'Na', 'Mg', 'Al', 'Ar', 'K', 'Ca',
     'Sc', 'Ti', 'V', 'Cr', 'Mn', 'Fe', 'Co', 'Ni', 'Cu', 'Zn',
     'Ga', 'Ge', 'As', 'Se', 'Kr', 'Rb', 'Sr', 'Y', 'Zr',
@@ -454,6 +452,7 @@ def main():
     base_db, block_size, output_folder, group_size, use_cols, progress_file = parse_args()
     
     start = time.perf_counter()
+    client = get_dask_client()
     
     base_db = json.loads(Path(base_db).read_text())
     with performance_report(filename="dask-HAC.html"):

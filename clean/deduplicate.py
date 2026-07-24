@@ -66,8 +66,6 @@ def get_dask_client():
     
     return client
 
-client = get_dask_client()
-
 # -------------------------
 # 1️⃣ Setup RDKit tools
 # -------------------------   
@@ -217,7 +215,7 @@ def main():
     block_size, output_folder, repartition_size, use_cols, input_path, drop_cols, if_assign_ids, meta = parse_args()
     
     start = time.perf_counter()
-    
+    client = get_dask_client()
     with performance_report(filename="dask-deduplicate.html"):
         
         input_path = Path(input_path)

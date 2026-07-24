@@ -39,12 +39,6 @@ def get_dask_client():
     
     return client
 
-client = get_dask_client()
-
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
 
 
 def compute_internal_duplication(
@@ -114,6 +108,10 @@ def get_pairwise_overlaps(
 
 def main():
     block_size, database_path, smiles_col, output_path = parse_args()
+    
+    client = get_dask_client()
+    logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger(__name__)
     
     with performance_report(filename="dask-isomer.html"):
         # Batch size can match #workers if desired, but each DB is processed fully partitioned
