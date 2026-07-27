@@ -504,19 +504,11 @@ class IsomerRetriever:
                                       "smiles": smiles, 
                                       "db_codes": self.commercial_db_codes}).df()
 
-    def add_vendor_info(
-        self,
-        isomers: pd.DataFrame,
-    ) -> pd.DataFrame:
-        """
-        Add the vendor information to the isomers.
-        """
-        db_list = isomers["db_id"].str.split(",").to_list()
-        new_x = []
-        for x in db_list:
-            a = [self.db_code_to_name[db] for db in x if db in self.db_code_to_name]
-            new_x.append(",".join(a))
-        isomers["vendor"] = new_x
+    def add_vendor_info(self, isomers: pd.DataFrame) -> pd.DataFrame:
+        exploded = isomers["db_id"].str.split(",").explode()
+        mapped = exploded.map(self.db_code_to_name).dropna()
+        vendor = mapped.groupby(level=[0,1]).agg(",".join)
+        isomers["vendor"] = vendor.reindex(isomers.index).fillna("")
         return isomers
     
     def _filter_commercial_isomers(
