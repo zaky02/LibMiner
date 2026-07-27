@@ -85,37 +85,16 @@ def _score_batch(
     ]
 
 
-def _process_row_range(
-    args: tuple[int, int, int, int, np.ndarray, float, list[str], int]
-) -> list[tuple[int, float]]:
-    """
-    Worker task streams its OWN row range with where(), scoring in
-    bounded-size sub-batches. Never materializes the full range at once.
-    """
+def _process_row_range(args):
     start_row, end_row, lower, upper, query_chunks, threshold, fp_fields, sub_chunk_size = args
 
-    colnames = _worker_table.colnames
-    dtype    = _worker_table.dtype
+    condition = f"(popcnt >= {lower}) & (popcnt <= {upper})"
+    matches = _worker_table.read_where(condition, start=start_row, stop=end_row)
 
     results = []
-    buffer = []
-
-    for row in _worker_table.where(
-        f"(popcnt >= {lower}) & (popcnt <= {upper})",
-        start=start_row, stop=end_row,
-    ):
-        # MUST extract values now Row object is invalidated on next iteration
-        buffer.append(tuple(row[name] for name in colnames))
-
-        if len(buffer) >= sub_chunk_size:
-            batch = np.array(buffer, dtype=dtype)
-            results.extend(_score_batch(batch, query_chunks, threshold, fp_fields))
-            buffer = []  # free memory immediately
-
-    if buffer:  # flush remainder
-        batch = np.array(buffer, dtype=dtype)
+    for i in range(0, len(matches), sub_chunk_size):
+        batch = matches[i:i + sub_chunk_size]
         results.extend(_score_batch(batch, query_chunks, threshold, fp_fields))
-
     return results
 
 
@@ -151,7 +130,6 @@ class ManualTanimoto:
         bounds = np.linspace(0, n_rows, self.n_workers + 1, dtype=np.int64)
         self._row_range_cache = list(zip(bounds[:-1].tolist(), bounds[1:].tolist()))
         
-
     def _start_pool(self) -> None:
         """Spawn workers, each opening the file once."""
         self._pool = Pool(
@@ -159,7 +137,6 @@ class ManualTanimoto:
             initializer=_init_worker,
             initargs=(self.h5_path,),
         )
-
 
     def _stop_pool(self) -> None:
         """Cleanly shut down workers (triggers atexit cleanup in each)."""
@@ -380,7 +357,9 @@ class SmilesRetriever:
              
         result = {}
         # connect to database and search using the combined indices and parquet files
-        db_con = duckdb.connect()   
+        db_con = duckdb.connect()
+        db_con.execute(f"PRAGMA threads={os.environ.get('SLURM_CPUS_PER_TASK', os.cpu_count())}")
+           
         res = self.retrieve_smiles(db_con, sorted(index), list(parquet))
         for query, index in search_result.items():
             if not index: continue
@@ -453,7 +432,8 @@ class IsomerRetriever:
         Main entry point: retrieve isomers for each query.
         """
         db_con = duckdb.connect()
-
+        db_con.execute(f"PRAGMA threads={os.environ.get('SLURM_CPUS_PER_TASK', os.cpu_count())}")
+        
         try:
             nostereo = pd.concat(queries.values(), axis=0)
             nostereo_smiles = list(set(nostereo["nostereo_SMILES"].to_list()))
@@ -600,11 +580,10 @@ class IsomerRetriever:
             for hac in set(hacs)
         ]
 
-    def _compute_hacs(self, smiles: list[str]) -> list[int]:
-        return [
-            dm.to_mol(smi).GetNumHeavyAtoms()
-            for smi in smiles
-        ]
+    def _compute_hacs(self, smiles: list[str], n_jobs: int = -1) -> list[int]:
+        def _hac(smi):
+            return dm.to_mol(smi).GetNumHeavyAtoms()
+        return dm.parallelized(_hac, smiles, n_jobs=n_jobs, progress=False, scheduler="threads")
 
     def _group_isomers_by_query(
         self,
