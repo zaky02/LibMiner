@@ -72,11 +72,9 @@ def _score_batch(
 
     a_and_b = np.bitwise_and(db_chunks, query_chunks)
     a_or_b  = np.bitwise_or(db_chunks,  query_chunks)
-
+    
     def popcnt_rows(x):
-        return np.unpackbits(
-            np.ascontiguousarray(x).view(np.uint8), axis=1, bitorder="big"
-        ).sum(axis=1, dtype=np.float32)
+        return np.bitwise_count(x).sum(axis=1, dtype=np.float32)
 
     scores = popcnt_rows(a_and_b) / popcnt_rows(a_or_b)
     mask = scores >= threshold
