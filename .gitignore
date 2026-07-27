@@ -11,3 +11,4 @@ clean/files
 clean/search_db
 tmp*
 *txt
+*.pyc
