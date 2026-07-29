@@ -16,8 +16,8 @@ import tables as tb
 import atexit
 from multiprocessing import Pool
 import time
-from .utils import convert_hac_to_mw, convert_mw_to_hac, inchi_key
-from .processing import protonate_acidic_oxygens
+from utils import convert_hac_to_mw, convert_mw_to_hac, inchi_key
+from processing import protonate_acidic_oxygens
 
 
 def parse_args():
