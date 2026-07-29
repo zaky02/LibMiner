@@ -217,6 +217,6 @@ def encode_fps_batch(
 
 
 def inchi_key(smiles):
-    mol = Chem.MolFromSmiles(smiles)
+    mol = Chem.MolFromSmiles(smiles) if isinstance(smiles, str) else smiles
     inchi = Chem.MolToInchi(mol)
     return Chem.InchiToInchiKey(inchi)

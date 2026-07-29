@@ -350,7 +350,8 @@ class SmilesRetriever:
             index = set([mol_id[0] for ind in search_result.values() for mol_id in ind])
         else:
             index = set([mol_id for ind in search_result.values() for mol_id in ind])
-        
+            
+        num_searched_indices = len(index)
         parquet = set()
         for i in parquet_paths.values():
             parquet.update(i)
@@ -361,6 +362,7 @@ class SmilesRetriever:
         db_con.execute(f"PRAGMA threads={os.environ.get('SLURM_CPUS_PER_TASK', os.cpu_count())}")
            
         res = self.retrieve_smiles(db_con, sorted(index), list(parquet))
+        
         for query, index in search_result.items():
             if not index: continue
             
@@ -380,7 +382,7 @@ class SmilesRetriever:
             result[query] = dat
             
         db_con.close()
-        return result, len(index)
+        return result, num_searched_indices
     
     def run(self, 
         search_result: dict[str, list[int]],
@@ -391,8 +393,8 @@ class SmilesRetriever:
         """
         hac_dict = self.find_hac_by_index(search_result)
         parquet_paths = self.convert_hac_topath(hac_dict)
-        smiles, index_length = self.batch_retrieve(search_result, parquet_paths, search_type)
-        return smiles, index_length
+        smiles, num_searched_indices = self.batch_retrieve(search_result, parquet_paths, search_type)
+        return smiles, num_searched_indices
 
 
 @dataclass
@@ -721,9 +723,9 @@ def main():
             search_results = read_search_results(top_k, search_type, outpath=outpath)
             retrieve = SmilesRetriever(index_file, molecular_database, mw_range, hac_limits)
             t0 = time.perf_counter()
-            smiles, index_length = retrieve.run(search_results, search_type)
+            smiles, num_searched_indices = retrieve.run(search_results, search_type)
             t1 = time.perf_counter()
-            log_time({"query": query_path.stem, "db_name": Path(molecular_database).stem, "elapsed": t1 - t0, "num_workers": num_workers, "length_index": index_length})
+            log_time({"num query": len(query), "db_name": Path(molecular_database).stem, "elapsed": t1 - t0, "num_workers": num_workers, "num molecules above threshold": num_searched_indices})
             pd.concat(smiles).to_csv(f"{query_path.parent}/{query_path.stem}_nostereo_smiles.csv")
             if search_type == "substructure":
                 smiles = match_substructure(query, smiles, num_workers)
@@ -733,7 +735,7 @@ def main():
 
             smiles = pd.concat(retrieve_isomers.run(smiles))
             t2 = time.perf_counter()
-            log_time({"query": query_path.stem, "db_name": Path(deduplicated_database).stem, "elapsed": t2 - t1, "num_workers": num_workers, "length_index": index_length})
+            log_time({"num query": len(query), "db_name": Path(deduplicated_database).stem, "elapsed": t2 - t1, "num_workers": num_workers, "num molecules above threshold": num_searched_indices})
             query_not_indb = list(set(query) - set(smiles.index.unique(0)))
             smiles = post_filter(smiles)
             print(f"{len(query_not_indb)} queries not found in the database, they will be saved in the output with ID, SMILES, db_id and Tanimoto set to 0")
