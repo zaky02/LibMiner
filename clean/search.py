@@ -59,42 +59,137 @@ def _init_worker(h5_path: str) -> None:
 
     atexit.register(_cleanup)
 
+def bitbounds(query_popcnt: int, threshold: float) -> tuple[int, int]:
+    lower = int(np.floor(threshold * query_popcnt))
+    upper = int(np.ceil(query_popcnt / threshold))
+    return lower, upper
+
+
 def _score_batch(
-    batch: np.ndarray,
+    db_chunks: np.ndarray,
+    fp_ids: np.ndarray,
+    db_popcnts: np.ndarray,
     query_chunks: np.ndarray,
+    query_popcnt: int,
     threshold: float,
-    fp_fields: list[str],
+    buffer: np.ndarray | None = None,
 ) -> list[tuple[int, float]]:
-    """Compute Tanimoto for a small in-memory batch and filter by threshold."""
-    db_chunks = np.stack(
-        [batch[f] for f in fp_fields], axis=1
-    ).astype(np.dtype("<u8"))
+    """
+    Compute Tanimoto for one query against a small in-memory batch.
 
-    a_and_b = np.bitwise_and(db_chunks, query_chunks)
-    a_or_b  = np.bitwise_or(db_chunks,  query_chunks)
-    
-    def popcnt_rows(x):
-        return np.bitwise_count(x).sum(axis=1, dtype=np.float32)
+    Uses precomputed database popcounts, so only bitwise AND is needed.
 
-    scores = popcnt_rows(a_and_b) / popcnt_rows(a_or_b)
-    mask = scores >= threshold
+    db_chunks: shape (n_rows, n_words), dtype uint64
+    fp_ids: shape (n_rows,)
+    db_popcnts: shape (n_rows,)  scalar popcount of database fingerprint
+    query_chunks: shape (n_words,), dtype uint64
+    query_popcnt: scalar popcount of query fingerprint
+    buffer: reusable temporary array of shape (n_rows, n_words)
+    """
+    n_rows, n_words = db_chunks.shape
+    if n_rows == 0:
+        return []
+
+    if buffer is None or buffer.shape != db_chunks.shape:
+        buffer = np.empty_like(db_chunks)
+
+    query_chunks = np.asarray(query_chunks, dtype=buffer.dtype)
+
+    # intersection = popcount(db & query)
+    np.bitwise_and(db_chunks, query_chunks, out=buffer)
+
+    # This allocates a popcount array, but it is usually small.
+    # For 50k rows x 32 words, this is only a few MB.
+    intersection = np.bitwise_count(buffer).sum(axis=1, dtype=np.float32)
+
+    # union = db_popcnt + query_popcnt - intersection
+    union = db_popcnts + query_popcnt - intersection
+
+    scores = np.zeros(n_rows, dtype=np.float32)
+    np.divide(intersection, union, out=scores, where=union > 0)
+
+    mask = (union > 0) & (scores >= threshold)
+
+    if not mask.any():
+        return []
 
     return [
         (int(fp_id), round(float(score), 4))
-        for fp_id, score in zip(batch["fp_id"][mask], scores[mask])
+        for fp_id, score in zip(fp_ids[mask], scores[mask])
     ]
 
 
 def _process_row_range(args):
-    start_row, end_row, lower, upper, query_chunks, threshold, fp_fields, sub_chunk_size = args
+    (
+        start_row,
+        end_row,
+        lower_bound,
+        upper_bound,
+        queries_data,
+        threshold,
+        fp_fields,
+        chunk_size,
+    ) = args
 
-    condition = f"(popcnt >= {lower}) & (popcnt <= {upper})"
-    matches = _worker_table.read_where(condition, start=start_row, stop=end_row)
+    results = {smi: [] for smi in queries_data}
+    n_words = len(fp_fields)
 
-    results = []
-    for i in range(0, len(matches), sub_chunk_size):
-        batch = matches[i:i + sub_chunk_size]
-        results.extend(_score_batch(batch, query_chunks, threshold, fp_fields))
+    buffer = np.empty((chunk_size, n_words), dtype=np.dtype("<u8"))
+
+    for chunk_start in range(start_row, end_row, chunk_size):
+        chunk_stop = min(chunk_start + chunk_size, end_row)
+
+        rows = _worker_table.read(
+            start=chunk_start,
+            stop=chunk_stop,
+        )
+
+        n_rows = len(rows)
+        if n_rows == 0:
+            continue
+
+        # Build compact fingerprint matrix.
+        db_chunks = np.empty((n_rows, n_words), dtype=np.dtype("<u8"))
+        for i, f in enumerate(fp_fields):
+            db_chunks[:, i] = rows[f]
+
+        popcnts = rows["popcnt"].copy()
+        fp_ids = rows["fp_id"].copy()
+
+        del rows
+
+        for smi, (query_words, query_popcnt) in queries_data.items():
+            lower = lower_bound[smi]
+            upper = upper_bound[smi]
+
+            qmask = (popcnts >= lower) & (popcnts <= upper)
+
+            if not qmask.any():
+                continue
+
+            valid_db = db_chunks[qmask]
+            valid_ids = fp_ids[qmask]
+            valid_popcnts = popcnts[qmask]
+
+            n_valid = len(valid_ids)
+
+            hits = _score_batch(
+                valid_db,
+                valid_ids,
+                valid_popcnts,
+                query_words,
+                query_popcnt,
+                threshold,
+                buffer[:n_valid],
+            )
+
+            if hits:
+                results[smi].extend(hits)
+
+            del valid_db, valid_ids, valid_popcnts
+
+        del db_chunks, popcnts, fp_ids
+
     return results
 
 
@@ -122,12 +217,10 @@ class ManualTanimoto:
     _finger_params: dict = field(default=None, init=False, repr=False)
     
     def __post_init__(self):
-        self._fp_fields, self._finger_params = self.get_info_from_db()
+        self._fp_fields, self._finger_params, n_rows = self.get_info_from_db()
         self._start_pool()
-        # cache row ranges table size doesn't change between queries
-        with tb.open_file(self.h5_path, mode="r") as f:
-            n_rows = f.root.fps.shape[0]
-        bounds = np.linspace(0, n_rows, self.n_workers + 1, dtype=np.int64)
+        
+        bounds = np.linspace(0, n_rows, self.n_workers*4 + 1, dtype=np.int64)
         self._row_range_cache = list(zip(bounds[:-1].tolist(), bounds[1:].tolist()))
         
     def _start_pool(self) -> None:
@@ -157,9 +250,11 @@ class ManualTanimoto:
         with tb.open_file(self.h5_path, "r") as f:
             dtype = f.root.fps.dtype
             finger_params = f.root.config[1]
+            n_rows = f.root.fps.shape[0]
+            
         fp_fields = [name for name in dtype.names if name not in ("fp_id", "popcnt")]
-        return fp_fields, finger_params
-
+        return fp_fields, finger_params, n_rows
+    
     def smiles_to_query_chunks(self, smiles: str) -> tuple[np.ndarray, int]:
         mol = dm.to_mol(smiles)
         bits = dm.to_fp(mol, fp_type=self.fp_type, **self._finger_params)
@@ -171,32 +266,35 @@ class ManualTanimoto:
         )
         return chunks, int(bits.sum())
 
-    @staticmethod
-    def bitbounds(query_popcnt: int, threshold: float) -> tuple[int, int]:
-        lower = int(np.floor(threshold * query_popcnt))
-        upper = int(np.ceil(query_popcnt / threshold))
-        return lower, upper
 
-    def tanimoto_search(self, smiles: str, threshold: float = 0.7) -> list[tuple[int, float]]:
+    def tanimoto_search(self, smiles: list[str], threshold: float = 0.7) -> list[tuple[int, float]]:
         """
         Search one query against the currently open database.
         Pool stays alive call this repeatedly for multiple queries, no respawning.
         """
-        
-        query_chunks, query_popcnt = self.smiles_to_query_chunks(smiles)
-        lower, upper = self.bitbounds(query_popcnt, threshold)
-
+        queries_data = {smi: self.smiles_to_query_chunks(smi) for smi in smiles}
+        lower_bound = {}
+        upper_bound = {}
+        for smi, (_, popcnt) in queries_data.items():
+            lower, upper = bitbounds(popcnt, threshold)
+            lower_bound[smi] = lower
+            upper_bound[smi] = upper
+            
         args = [
-            (start, end, lower, upper, query_chunks, threshold, self._fp_fields, self.chunk_size)
+            (start, end, lower_bound, upper_bound, queries_data, threshold, self._fp_fields, self.chunk_size)
             for start, end in self._row_range_cache
         ]
 
         chunk_results = self._pool.map(_process_row_range, args)
 
-        return sorted(
-            [hit for chunk in chunk_results for hit in chunk],
-            key=lambda x: -x[1],
-        )
+        # 5. Merge results
+        final_results = {smi: [] for smi in smiles}
+        for res_dict in chunk_results:
+            for smi, hits in res_dict.items():
+                final_results[smi].extend(hits)
+                
+        # Sort and return
+        return {smi: sorted(hits, key=lambda x: -x[1]) for smi, hits in final_results.items()}
 
 
 @dataclass
@@ -222,12 +320,14 @@ class FPSim2Query:
         results = {}
         # one ManualTanimoto per database pool lives for the full set of queries
         with ManualTanimoto(self.db_name, self.workers, chunk_size, fp_type) as engine:
-            for smiles in self.queries:
-                t0 = time.perf_counter()
-                results[smiles] = engine.tanimoto_search(smiles, threshold=threshold)
-                elapsed = time.perf_counter() - t0
-                log_time({"query": smiles, "db_name": Path(self.db_name).stem.split("_")[1],
-                    "search_type": "similarity", "elapsed": elapsed, "num_workers": self.workers})
+            elapsed = 0
+            t0 = time.perf_counter()
+            results = engine.tanimoto_search(self.queries, threshold=threshold)
+            elapsed += time.perf_counter() - t0
+            
+            log_time({"query": len(self.queries), "db_name": Path(self.db_name).stem.split("_")[1],
+                    "search_type": "similarity", "elapsed": elapsed, "num_workers": self.workers, 
+                    "time/query": elapsed / len(self.queries) if self.queries else 0})
         return results
     
     def substructure_screenout(
