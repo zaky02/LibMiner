@@ -800,7 +800,7 @@ def get_max(database_path, outpath, column="num_ID"):
         f.writelines(res)
 
 def post_filter(retrieved_smiles):
-    retrieved_smiles["inch_key"] = [inchi_key(protonate_acidic_oxygens(x, return_mol=False)) for x in retrieved_smiles.index.unique(1)]
+    retrieved_smiles["inch_key"] = [inchi_key(protonate_acidic_oxygens(x, return_mol=False)) for x in retrieved_smiles.index.get_level_values(1)]
     return retrieved_smiles.drop_duplicates("inch_key").drop("inch_key", axis=1)
 
 
