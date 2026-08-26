@@ -327,7 +327,7 @@ class FPSim2Query:
             
             log_time({"query": len(self.queries), "db_name": Path(self.db_name).stem.split("_")[1],
                     "search_type": "similarity", "elapsed": elapsed, "num_workers": self.workers, 
-                    "time/query": elapsed / len(self.queries) if self.queries else 0})
+                    "time/query": elapsed / len(self.queries) if self.queries else 0, "threshold": threshold})
         return results
     
     def substructure_screenout(
@@ -476,8 +476,9 @@ class SmilesRetriever:
                 index["mol_id"] = index["mol_id"].astype(int)
                 index.set_index("mol_id", inplace=True)
                 dat = res[res["num_ID"].isin(index.index)]
-                coeff = index.loc[dat["num_ID"]]["Tanimoto"]
-                dat["Tanimoto"] = coeff.values
+                coeff = index.loc[dat["num_ID"]]
+                dat["Tanimoto"] = coeff["Tanimoto"].values
+                dat["num_ID"] = coeff.index
                 
             result[query] = dat
             
@@ -693,7 +694,7 @@ class IsomerRetriever:
             subset = all_isomers[
                 all_isomers["nostereo_SMILES"].isin(df["nostereo_SMILES"])
             ]
-            tanimoto_lookup = df[["nostereo_SMILES", "Tanimoto"]]
+            tanimoto_lookup = df[["nostereo_SMILES", "Tanimoto", "num_ID"]]
             subset = subset.merge(tanimoto_lookup, how="left", on="nostereo_SMILES").set_index("SMILES").sort_values("Tanimoto", ascending=False)
 
             result[query] = subset

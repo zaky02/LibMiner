@@ -181,9 +181,9 @@ def protonate_acidic_oxygens(mol, return_mol=True):
     mol = rwmol.GetMol()
     
     if return_mol:
-        return mol
+        return dm.sanitize_mol(mol)
     
-    return Chem.MolToSmiles(Chem.SanitizeMol(mol))
+    return Chem.MolToSmiles(dm.sanitize_mol(mol))
 
 
 def normalize_smiles(smi: str, 
