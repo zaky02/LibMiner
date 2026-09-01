@@ -185,9 +185,33 @@ def protonate_acidic_oxygens(mol, return_mol=True):
     
     return Chem.MolToSmiles(dm.sanitize_mol(mol))
 
+# Matches 4 consecutive heavy non-carbon atoms linked together (handles branching + rings)
+PAT_CATENATED_HETERO = Chem.MolFromSmarts("[!#6;!#1][!#6;!#1][!#6;!#1]~[!#6;!#1]")
+
+def chemical_anomalies(mol, max_hetero_ratio=3.5):
+
+    # 1. Heteroatom-to-Carbon Ratio (only for molecules with > 8 heavy atoms)
+    num_heavy = mol.GetNumHeavyAtoms()
+    num_carbons = sum(1 for a in mol.GetAtoms() if a.GetAtomicNum() == 6)
+    
+    if num_carbons == 0:
+        return True
+        
+    num_hetero = num_heavy - num_carbons
+    ratio = num_hetero / num_carbons
+    
+    if num_heavy > 8 and ratio > max_hetero_ratio:
+        return True
+
+    # 2. Graph Substructure Match for 4+ linked non-carbon atoms
+    # Catches PPP..., SSS..., OOO..., NNN..., =P-P=P-P= (branched or linear)
+    if mol.HasSubstructMatch(PAT_CATENATED_HETERO):
+        return True
+
+    return False
 
 def normalize_smiles(smi: str, 
-                     check_isotopes: bool = False) -> str | None:
+                     checks: bool = False) -> str | None:
     """Normalize SMILES by:
     - Converting to canonical isomeric SMILES
     - Removing salts (keeping largest fragment)
@@ -197,8 +221,8 @@ def normalize_smiles(smi: str,
     ----------
     smi : str
         Input SMILES string
-    check_isotopes : bool
-        If True, molecules with isotopes are considered invalid
+    checks : bool
+        If True, perform additional chemistry checks
         
     Returns
     ------- 
@@ -215,7 +239,9 @@ def normalize_smiles(smi: str,
                 return None
             # filtrado por moleculas que contienen isotopos o metales
             # demoemento Molport y surechemble seguro que tienen isotopos
-            if check_isotopes and any(atom.GetIsotope() != 0 for atom in mol.GetAtoms()):
+            if checks and any(atom.GetIsotope() != 0 for atom in mol.GetAtoms()):
+                return None
+            if checks and chemical_anomalies(mol):
                 return None
             
             mol = dm.standardize_mol(
@@ -238,8 +264,8 @@ def normalize_smiles(smi: str,
                 return None
             if mol.HasSubstructMatch(unsatu):
                 return None
-
-            mol = protonate_acidic_oxygens(mol)
+            if checks:
+                mol = protonate_acidic_oxygens(mol)
             mol = Chem.SanitizeMol(mol)
             sma = Chem.MolToSmiles(mol, canonical=True, isomericSmiles=True)
             
@@ -385,7 +411,7 @@ def write_db_by_hac(db_id: str, pattern: list[str], output_folder: Path,
     ddf = ddf.dropna(subset=["SMILES"]).drop_duplicates(subset=use_cols[0])
 
     # Normalize SMILES
-    normalize = partial(normalize_smiles, check_isotopes=(group_id not in ignore_isotops))
+    normalize = partial(normalize_smiles, checks=(group_id not in ignore_isotops))
     ddf["SMILES"] = ddf.map_partitions(lambda df: df["SMILES"].map(normalize), meta=("SMILES", str))
     ddf = ddf.dropna(subset=["SMILES"])
     ddf["db_id"] = group_id
