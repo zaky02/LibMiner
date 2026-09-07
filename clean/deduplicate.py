@@ -142,7 +142,6 @@ def deduplicator_previous(hac_folders: Path | str,
     )
     
     del ddf_merged
-    client.run(gc.collect)
     
     return count
 
@@ -173,7 +172,6 @@ def deduplicator(
         tmp_path = out_path / f"HAC_{hac}_tmp"
         ddf.to_parquet(tmp_path, write_index=False, compute=True, engine="pyarrow")
         del ddf
-        client.run(gc.collect)
 
         ddf = dd.read_parquet(f"{tmp_path}/*.parquet")
         partition_lengths = ddf.map_partitions(len).compute()
@@ -204,7 +202,6 @@ def deduplicator(
         shutil.rmtree(tmp_path)
 
     del ddf
-    client.run(gc.collect)
     return count
 
 # -------------------------
