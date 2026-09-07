@@ -10,7 +10,6 @@ from dask.distributed import Client, performance_report, LocalCluster
 import pyarrow.parquet as pq
 import datamol as dm
 import json
-import gc
 import re
 from functools import partial
 
@@ -185,29 +184,59 @@ def protonate_acidic_oxygens(mol, return_mol=True):
     
     return Chem.MolToSmiles(dm.sanitize_mol(mol))
 
-# Matches 4 consecutive heavy non-carbon atoms linked together (handles branching + rings)
-PAT_CATENATED_HETERO = Chem.MolFromSmarts("[!#6;!#1][!#6;!#1][!#6;!#1]~[!#6;!#1]")
+# Matches 5 consecutive heavy non-carbon atoms linked together (handles branching + rings)
+HETERO_ATOMIC_NUMBERS = [7, 8, 9, 14, 15, 16, 17, 35, 53]
 
-def chemical_anomalies(mol, max_hetero_ratio=3.5):
+PAT_REPETITIVE_HETERO = [
+    Chem.MolFromSmarts(
+        "~".join([f"[#{n};!a]"] * 5)
+    )
+    for n in HETERO_ATOMIC_NUMBERS
+]
+
+PAT_TOO_MANY_PHOSPHATES = Chem.MolFromSmarts(
+    "[#15]~[#8]~[#15]~[#8]~[#15]~[#8]~[#15]"
+)
+
+PAT_LONG_C_CHAIN = Chem.MolFromSmarts(
+    "~".join(["[#6]"] * 13)
+)
+
+def chemical_anomalies(mol, max_hetero_ratio=3.0):
 
     # 1. Heteroatom-to-Carbon Ratio (only for molecules with > 8 heavy atoms)
     num_heavy = mol.GetNumHeavyAtoms()
     num_carbons = sum(1 for a in mol.GetAtoms() if a.GetAtomicNum() == 6)
     
+    # No number of carbons, likely inorganic or highly unusual chemistry
     if num_carbons == 0:
         return True
         
     num_hetero = num_heavy - num_carbons
     ratio = num_hetero / num_carbons
     
+    # The ratio of heavy atoms is too high compared to carbons, 
+    # likely inorganic or highly unusual chemistry
     if num_heavy > 8 and ratio > max_hetero_ratio:
+        return True
+    
+    # no hydrogens, likely inorganic
+    num_h = sum(a.GetTotalNumHs() for a in mol.GetAtoms())
+    if num_h == 0:
         return True
 
     # 2. Graph Substructure Match for 4+ linked non-carbon atoms
     # Catches PPP..., SSS..., OOO..., NNN..., =P-P=P-P= (branched or linear)
-    if mol.HasSubstructMatch(PAT_CATENATED_HETERO):
+    for pattern in PAT_REPETITIVE_HETERO:
+        if mol.HasSubstructMatch(pattern):
+            return True
+        
+    if mol.HasSubstructMatch(PAT_TOO_MANY_PHOSPHATES):
         return True
-
+    
+    if mol.HasSubstructMatch(PAT_LONG_C_CHAIN):
+        return True
+    
     return False
 
 def normalize_smiles(smi: str, 
@@ -255,7 +284,7 @@ def normalize_smiles(smi: str,
             
             mol = dm.fix_mol(mol, largest_only=True if "." in smi else False)
             
-            mol = dm.isomers.canonical_tautomer(mol)
+            
             
             if is_true_peptide(mol): # skip true peptides
                 return None
@@ -265,7 +294,9 @@ def normalize_smiles(smi: str,
             if mol.HasSubstructMatch(unsatu):
                 return None
             if checks:
+                mol = dm.isomers.canonical_tautomer(mol)
                 mol = protonate_acidic_oxygens(mol)
+                
             mol = Chem.SanitizeMol(mol)
             sma = Chem.MolToSmiles(mol, canonical=True, isomericSmiles=True)
             
@@ -363,7 +394,7 @@ def split_csv_groups_by_size(
 
 def write_db_by_hac(db_id: str, pattern: list[str], output_folder: Path, 
                     blocksize="64MB", use_cols: tuple[str] = ("ID", "SMILES"),
-                    ignore_isotops=("001", "002", "003", "006", "011", "014")) -> None:
+                    commercial=("001", "002", "003", "006", "011", "014")) -> None:
     """
     Normalize SMILES, deduplicate locally,
     split by HAC, and write to HAC-specific Parquet folders.
@@ -380,8 +411,8 @@ def write_db_by_hac(db_id: str, pattern: list[str], output_folder: Path,
         Dask block size
     use_cols : tuple[str], optional
         Columns to read from input files
-    ignore_isotops : tuple[str], optional
-        Database IDs to ignore isotope checks during normalization
+    commercial : tuple[str], optional
+        Database IDs to treat as commercial
         
     Returns
     -------
@@ -411,7 +442,7 @@ def write_db_by_hac(db_id: str, pattern: list[str], output_folder: Path,
     ddf = ddf.dropna(subset=["SMILES"]).drop_duplicates(subset=use_cols[0])
 
     # Normalize SMILES
-    normalize = partial(normalize_smiles, checks=(group_id not in ignore_isotops))
+    normalize = partial(normalize_smiles, checks=(group_id not in commercial))
     ddf["SMILES"] = ddf.map_partitions(lambda df: df["SMILES"].map(normalize), meta=("SMILES", str))
     ddf = ddf.dropna(subset=["SMILES"])
     ddf["db_id"] = group_id
@@ -430,7 +461,6 @@ def write_db_by_hac(db_id: str, pattern: list[str], output_folder: Path,
     )
 
     del ddf
-    client.run(gc.collect)
 
     print(f"DB {db_id} written to {output_folder}")
 
