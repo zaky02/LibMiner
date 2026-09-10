@@ -38,10 +38,9 @@ def parse_args():
     parser.add_argument('-p','--pairwise_database', type=str, help='The folder path for the pairwise database', required=False, default='Molecular_database/pairwise_analysis')
     parser.add_argument("-s", "--stage", choices=("search", "retrieve"), default="search", help="Runing search or retrieve")
     parser.add_argument('-ch','--chunk_size', type=int, help='The chunck size for the tanimoto search', required=False, default=150_000)
-    parser.add_argument("-so", "--sorted", action="store_true", help="Whether to use the sorted search, it is faster for single queries at higher thresholds like 0.9, but not much gain otherwise", required=False)
     
     args = parser.parse_args()
-    return args.db_name, args.nostereo_database, args.index_file, args.top_k, args.threshold, args.num_workers, args.query_path, args.hac_limits, args.mw_range, args.search_type, args.deduplicated_database, args.commercially_avaliable, args.commercial_databases, args.pairwise_database,  args.stage, args.chunk_size, args.sorted
+    return args.db_name, args.nostereo_database, args.index_file, args.top_k, args.threshold, args.num_workers, args.query_path, args.hac_limits, args.mw_range, args.search_type, args.deduplicated_database, args.commercially_avaliable, args.commercial_databases, args.pairwise_database,  args.stage, args.chunk_size
 
 
 # ── Worker-global state ─────────────────────────────────────────────────────────
@@ -220,7 +219,7 @@ class ManualTanimoto:
     _popcnts: np.ndarray = field(default=None, init=False, repr=False)
     
     def __post_init__(self):
-        self._fp_fields, self._finger_params, n_rows = self.get_info_from_db()
+        self._fp_fields, self._finger_params, n_rows, self._popcnts = self.get_info_from_db()
         self._start_pool()
         
         bounds = np.linspace(0, n_rows, self.n_workers*4 + 1, dtype=np.int64)
@@ -271,7 +270,7 @@ class ManualTanimoto:
         return chunks, int(bits.sum())
 
 
-    def tanimoto_search(self, smiles: list[str], threshold: float = 0.7, sorted_search=False) -> list[tuple[int, float]]:
+    def tanimoto_search(self, smiles: list[str], threshold: float = 0.7) -> list[tuple[int, float]]:
         """
         Search one query against the currently open database.
         Pool stays alive call this repeatedly for multiple queries, no respawning.
@@ -283,23 +282,6 @@ class ManualTanimoto:
             lower, upper = bitbounds(popcnt, threshold)
             lower_bound[smi] = lower
             upper_bound[smi] = upper
-            
-        if sorted_search:
-            global_lower = min(lower_bound.values())
-            global_upper = max(upper_bound.values())
-            
-            pop = [x[0] for x in self._popcnts]
-            start = int(np.searchsorted(pop, global_lower, side='left'))
-            end = int(np.searchsorted(pop, global_upper, side='right'))
-            if end == len(self._popcnts):
-                end = end-1
-            valid_start =  int(self._popcnts[start][1][0])
-            valid_end = int(self._popcnts[end][1][-1])
-            
-            n_chunks = self.n_workers*4  
-            bounds = np.linspace(valid_start, valid_end, n_chunks + 1, dtype=np.int64)
-            self._row_range_cache = list(zip(bounds[:-1].tolist(), bounds[1:].tolist()))
-
             
         args = [
             (start, end, lower_bound, upper_bound, queries_data, threshold, self._fp_fields, self.chunk_size)
@@ -333,7 +315,6 @@ class FPSim2Query:
         threshold: float = 0.7,
         chunk_size: int = 150_000,
         fp_type: str = "ecfp",
-        sorted_search: bool = False
     ) -> dict[str, list[tuple[int, float]]]:
         """
         Search all queries against all databases.
@@ -344,8 +325,7 @@ class FPSim2Query:
         with ManualTanimoto(self.db_name, self.workers, chunk_size, fp_type) as engine:
             elapsed = 0
             t0 = time.perf_counter()
-            results = engine.tanimoto_search(self.queries, threshold=threshold, 
-                                             sorted_search=sorted_search)
+            results = engine.tanimoto_search(self.queries, threshold=threshold)
             elapsed += time.perf_counter() - t0
             
             log_time({"query": len(self.queries), "db_name": Path(self.db_name).stem.split("_")[1],
@@ -753,8 +733,7 @@ def process_query_by_db(db_name: str, query: str | list[str],
                         threshold: float = 0.7, 
                         search_type: str = "similarity",
                         outpath: Path = Path("search_results"),
-                        chunk_size=150_000,
-                        sorted_search: bool = False):
+                        chunk_size=150_000):
     
     task_id = int(os.environ.get('SLURM_ARRAY_TASK_ID', 0))
     array_size = int(os.environ.get('SLURM_ARRAY_TASK_COUNT', 0))
@@ -772,8 +751,7 @@ def process_query_by_db(db_name: str, query: str | list[str],
             continue
         
         fp = FPSim2Query(query=query, db_name=db, workers=num_workers)
-        search = {"similarity": partial(fp.similarity_search, threshold=threshold, chunk_size=chunk_size,
-                                        sorted_search=sorted_search),
+        search = {"similarity": partial(fp.similarity_search, threshold=threshold, chunk_size=chunk_size),
                   "substructure": fp.substructure_screenout}    
         
         search_results = search[search_type]()
@@ -831,7 +809,7 @@ def post_filter(retrieved_smiles):
 
 
 def main():
-    db_name, molecular_database, index_file, top_k, threshold, num_workers, query_path, hac_limits, mw_range, search_type, deduplicated_database, commercially_avaliable, commercial_databases, pairwise_database,  stage,chunk_size, sorted_search = parse_args()
+    db_name, molecular_database, index_file, top_k, threshold, num_workers, query_path, hac_limits, mw_range, search_type, deduplicated_database, commercially_avaliable, commercial_databases, pairwise_database,  stage,chunk_size = parse_args()
    
     query_path = Path(query_path)
     with open(query_path) as w:
