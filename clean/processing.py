@@ -185,8 +185,23 @@ def protonate_acidic_oxygens(mol, return_mol=True):
     return Chem.MolToSmiles(dm.sanitize_mol(mol))
 
 # Matches 5 consecutive heavy non-carbon atoms linked together (handles branching + rings)
-HETERO_ATOMIC_NUMBERS = [7, 8, 9, 14, 15, 16, 17, 35, 53]
+HETERO_ATOMIC_NUMBERS = [
+    8,   # O
+    9,   # F
+    14,  # Si
+    15,  # P
+    16,  # S
+    17,  # Cl
+    35,  # Br
+    53,  # I
+]
 
+# Five consecutive atoms of the same non-aromatic heteroatom.
+#
+# Examples rejected:
+#   P-P-P-P-P
+#   P=P-P=P-P
+#   S-S-S-S-S
 PAT_REPETITIVE_HETERO = [
     Chem.MolFromSmarts(
         "~".join([f"[#{n};!a]"] * 5)
@@ -194,12 +209,15 @@ PAT_REPETITIVE_HETERO = [
     for n in HETERO_ATOMIC_NUMBERS
 ]
 
+PAT_REPETITIVE_HETERO.append(Chem.MolFromSmarts("~".join([f"[#7;!a]"] * 6))) # 7 nitrogen
+
+
 PAT_TOO_MANY_PHOSPHATES = Chem.MolFromSmarts(
     "[#15]~[#8]~[#15]~[#8]~[#15]~[#8]~[#15]"
 )
 
 PAT_LONG_C_CHAIN = Chem.MolFromSmarts(
-    "~".join(["[#6]"] * 13)
+    "-".join(["[#6;!R]"] * 15)
 )
 
 def chemical_anomalies(mol, max_hetero_ratio=3.0):
