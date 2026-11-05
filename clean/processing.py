@@ -217,7 +217,7 @@ PAT_TOO_MANY_PHOSPHATES = Chem.MolFromSmarts(
 )
 
 PAT_LONG_C_CHAIN = Chem.MolFromSmarts(
-    "-".join(["[#6;!R]"] * 15)
+    "~".join(["[#6;!R;D2]"] * 15)
 )
 
 def chemical_anomalies(mol, max_hetero_ratio=3.0):
@@ -301,8 +301,6 @@ def normalize_smiles(smi: str,
             )
             
             mol = dm.fix_mol(mol, largest_only=True if "." in smi else False)
-            
-            
             
             if is_true_peptide(mol): # skip true peptides
                 return None
