@@ -209,13 +209,14 @@ PAT_REPETITIVE_HETERO = [
     for n in HETERO_ATOMIC_NUMBERS
 ]
 
-PAT_REPETITIVE_HETERO.append(Chem.MolFromSmarts("~".join([f"[#7;!a]"] * 6))) # 7 nitrogen
+PAT_REPETITIVE_HETERO.append(Chem.MolFromSmarts("~".join(["[#7;!a]"] * 6))) # 7 nitrogen
 
 
 PAT_TOO_MANY_PHOSPHATES = Chem.MolFromSmarts(
     "[#15]~[#8]~[#15]~[#8]~[#15]~[#8]~[#15]"
 )
 
+# 15 consecutive carbons that are all non-ring and each have exactly two neighbors, so not branches.
 PAT_LONG_C_CHAIN = Chem.MolFromSmarts(
     "~".join(["[#6;!R;D2]"] * 15)
 )

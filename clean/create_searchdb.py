@@ -198,7 +198,7 @@ def create_index_on_existing_file(batch_output: Path | str,
        
             
 def stage_create_fingerprints(output_smi: str | Path, fp_type: str, fp_param: dict,
-                              chunk_num: int = 255):
+                              chunk_num: int = 255, input_seachdb=Path("indexed_chunks")):
     """Stage 3: Create fingerprint chunks (parallelized via SLURM array)"""
     
     # Get SLURM array task ID
@@ -207,7 +207,7 @@ def stage_create_fingerprints(output_smi: str | Path, fp_type: str, fp_param: di
     
     print(f"[Task {task_id}/{array_size}] Starting fingerprint generation")
     
-    TMP_DIR = Path("indexed_chunks")
+    TMP_DIR = Path(input_seachdb)
     TMP_DIR.mkdir(exist_ok=True)
     
     # Count total molecules
@@ -510,7 +510,7 @@ def main():
     elif stage == 'merge_smi':
         stage_merge_smi(input_path, output_smi)
     elif stage == 'fingerprint':
-        stage_create_fingerprints(output_smi, fp_type, fp_param, chunk_num)
+        stage_create_fingerprints(output_smi, fp_type, fp_param, chunk_num, input_searchdb)
     elif stage == 'sort' or stage == 'index':
         stage_final(input_searchdb, output_searchdb, sort_by_popcnt=(stage == 'sort'), compression_level=compression_level)
     else:
