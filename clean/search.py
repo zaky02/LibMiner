@@ -769,6 +769,7 @@ def read_search_results(top_k: None | int = None,
                         search_type: str = "similarity",
                         outpath: Path = Path("search_results")) -> dict[str, list[tuple[int, int]]]:
     
+    outpath = Path(outpath)
     if not outpath.exists():
         raise FileNotFoundError("The folder for the search results doesn't exists, check the folder")
     res = {}
